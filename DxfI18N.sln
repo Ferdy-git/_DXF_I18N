@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36429.23
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DxfI18N", "DxfI18N.csproj", "{9ECA436E-4F97-4AB6-8C65-FF7DD7E0C594}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9ECA436E-4F97-4AB6-8C65-FF7DD7E0C594}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9ECA436E-4F97-4AB6-8C65-FF7DD7E0C594}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9ECA436E-4F97-4AB6-8C65-FF7DD7E0C594}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9ECA436E-4F97-4AB6-8C65-FF7DD7E0C594}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9A1E69DA-5566-4775-BE30-5D0569B529A4}
+	EndGlobalSection
+EndGlobal
