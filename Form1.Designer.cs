@@ -61,9 +61,10 @@ namespace DxfI18N.App
         private Label lblFiltro;
         private TextBox txtFilter;
 
-        private Button btnExportCsv;        // Mancanti
-        private Button btnImportCsv;        // Import
-        private Button btnExportLanguage;   // Estrai lingua (tutte)
+        private Button btnExportCsv;        // Esporta mancanti
+        private Button btnImportCsv;        // Import CSV
+        private Button btnExportLanguage;   // Estrai lingua (tutta)
+        private Button btnExportAllPending; // Estrai TUTTO (non Approved) — opzionale
 
         private Button btnSetApproved;
         private Button btnSetDraft;
@@ -106,6 +107,7 @@ namespace DxfI18N.App
             statusStrip = new StatusStrip();
             tsslDbPath = new ToolStripStatusLabel { Spring = true, Text = "DB: (nessuno)", TextAlign = ContentAlignment.MiddleLeft };
             statusStrip.Items.AddRange(new ToolStripItem[] { tsslDbPath });
+            statusStrip.SizingGrip = false;
             statusStrip.Dock = DockStyle.Bottom;
 
             // ====== TabControl ======
@@ -196,18 +198,18 @@ namespace DxfI18N.App
             btnExportCsv = new Button { Name = "btnExportCsv", Text = "Esporta mancanti", Size = new Size(130, 28), Location = new Point(10, 46) };
             btnImportCsv = new Button { Name = "btnImportCsv", Text = "Importa CSV", Size = new Size(110, 28), Location = new Point(150, 46) };
             btnExportLanguage = new Button { Name = "btnExportLanguage", Text = "Estrai lingua", Size = new Size(110, 28), Location = new Point(270, 46) };
+            btnExportAllPending = new Button { Name = "btnExportAllPending", Text = "Estrai TUTTO (non Approved)", Size = new Size(200, 28), Location = new Point(390, 46) };
 
-            btnSetApproved = new Button { Name = "btnSetApproved", Text = "Approved", Size = new Size(90, 28), Location = new Point(390, 46) };
-            btnSetDraft = new Button { Name = "btnSetDraft", Text = "Draft", Size = new Size(80, 28), Location = new Point(485, 46) };
-            btnSetBlocked = new Button { Name = "btnSetBlocked", Text = "Blocked", Size = new Size(90, 28), Location = new Point(570, 46) };
+            btnSetApproved = new Button { Name = "btnSetApproved", Text = "Approved", Size = new Size(90, 28), Location = new Point(600, 46) };
+            btnSetDraft = new Button { Name = "btnSetDraft", Text = "Draft", Size = new Size(80, 28), Location = new Point(695, 46) };
+            btnSetBlocked = new Button { Name = "btnSetBlocked", Text = "Blocked", Size = new Size(90, 28), Location = new Point(780, 46) };
 
-            chkOverwriteApproved = new CheckBox { Name = "chkOverwriteApproved", Text = "Consenti sovrascrittura Approved (import)", AutoSize = true, Location = new Point(670, 50) };
-
-            lblStatsTranslations = new Label { Name = "lblStatsTranslations", Text = "—", AutoSize = true, Location = new Point(900, 12), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            chkOverwriteApproved = new CheckBox { Name = "chkOverwriteApproved", Text = "Consenti sovrascrittura Approved (import)", AutoSize = true, Location = new Point(880, 12) };
+            lblStatsTranslations = new Label { Name = "lblStatsTranslations", Text = "—", AutoSize = true, Location = new Point(880, 50), Anchor = AnchorStyles.Top | AnchorStyles.Right };
 
             panelTopTranslations.Controls.AddRange(new Control[] {
                 lblLang, cmbCultureTranslations, lblFiltro, txtFilter,
-                btnExportCsv, btnImportCsv, btnExportLanguage,
+                btnExportCsv, btnImportCsv, btnExportLanguage, btnExportAllPending,
                 btnSetApproved, btnSetDraft, btnSetBlocked,
                 chkOverwriteApproved, lblStatsTranslations
             });

@@ -47,6 +47,7 @@ namespace DxfI18N.App
             btnExportCsv.Click += (s, e) => OnExportMissingCsv();
             btnImportCsv.Click += (s, e) => OnImportCsv();
             btnExportLanguage.Click += (s, e) => OnExportWholeLanguage();
+            btnExportAllPending.Click += (s, e) => OnExportAllPending();
             btnSetApproved.Click += (s, e) => OnSetStatusSelected("Approved");
             btnSetDraft.Click += (s, e) => OnSetStatusSelected("Draft");
             btnSetBlocked.Click += (s, e) => OnSetStatusSelected("Blocked");
@@ -127,7 +128,7 @@ namespace DxfI18N.App
             using var dlg = new OpenFileDialog
             {
                 Title = "Seleziona database SQLite",
-                Filter = "SQLite DB (*.sqlite;*.db)|*.sqlite;*.db|Tutti i file (*.*)|*.*",
+                Filter = "SQLite DB (*.sqlite;*.db;*.db3)|*.sqlite;*.db;*.db3|Tutti i file (*.*)|*.*",
                 CheckFileExists = true,
                 Multiselect = false
             };
@@ -667,6 +668,57 @@ namespace DxfI18N.App
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+        private void OnExportAllPending()
+        {
+            var dbPath = Db.GetDatabasePath();
+            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
+            {
+                MessageBox.Show(this, "Seleziona il database (Scegli DB…).", "MANCANO PREREQUISITI",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var rows = Db.GetAllPendingForExport();
+            if (rows.Count == 0)
+            {
+                MessageBox.Show(this, "Tutto APPROVED: nulla da esportare.", "INFO",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using var sfd = new SaveFileDialog
+            {
+                Title = "Esporta CSV (tutte le lingue non Approved)",
+                Filter = "CSV (*.csv)|*.csv",
+                FileName = $"translations_pending_all_{DateTime.Now:yyyyMMdd}.csv",
+                OverwritePrompt = true
+            };
+            if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+            try
+            {
+                using var sw = new StreamWriter(sfd.FileName, false, System.Text.Encoding.UTF8);
+                using var csv = new CsvWriter(sw, CultureInfo.InvariantCulture);
+                csv.WriteField("KeyId"); csv.WriteField("DefaultText"); csv.WriteField("Culture"); csv.WriteField("Translated"); csv.WriteField("Status"); csv.NextRecord();
+                foreach (var r in rows)
+                {
+                    csv.WriteField(r.keyId);
+                    csv.WriteField(r.defaultText);
+                    csv.WriteField(r.culture);
+                    csv.WriteField(r.translated);
+                    csv.WriteField(r.status);
+                    csv.NextRecord();
+                }
+                csv.Flush(); sw.Flush();
+                MessageBox.Show(this, $"Export COMPLETATO.\nRighe: {rows.Count}\n{sfd.FileName}",
+                    "COMPLETATO", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Errore export CSV:\n{ex.Message}", "ERRORE",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
 
         /// <summary>Importa un CSV (può contenere più lingue). Rispetta Status e protezione degli Approved.</summary>
         private void OnImportCsv()
@@ -794,10 +846,22 @@ namespace DxfI18N.App
                 return;
             }
 
+            // Conferma: includiamo anche le traduzioni non Approved
+            var ans = MessageBox.Show(this,
+                "Hai controllato i Not Approved?",
+                "Conferma",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (ans == DialogResult.No) return;
+
+            // Cartella di default (creala se manca)
+            var defaultDir = @"C:\_ProjNoGit\_DXF_I18N\_DXF";
+            try { Directory.CreateDirectory(defaultDir); } catch { /* ok */ }
+
             using var sfd = new SaveFileDialog
             {
                 Title = "Salva DXF unico",
                 Filter = "DXF (*.dxf)|*.dxf",
+                InitialDirectory = defaultDir,
                 FileName = Path.GetFileNameWithoutExtension(sourcePath) + "_multi.dxf",
                 OverwritePrompt = true
             };
@@ -807,14 +871,16 @@ namespace DxfI18N.App
             {
                 var src = DxfDocument.Load(sourcePath);
 
-                // 1) Layer lingua
-                var cultureLayers = Db.GetCultureLayers(); // (Code, LayerName)
+                // 1) Layer per lingua (LayerRules: CultureCode, LayerName)
+                var cultureLayers = Db.GetCultureLayers(); // IEnumerable<(string Code, string LayerName)>
                 foreach (var (_, layerName) in cultureLayers)
+                {
                     if (!src.Layers.Contains(layerName))
                         src.Layers.Add(new Layer(layerName));
+                }
 
-                // 2) Mappa traduzioni (opzione: solo Approved)
-                bool onlyApproved = chkOnlyApprovedGen.Checked;
+                // 2) Mappa traduzioni: prendiamo TUTTI (non solo Approved)
+                bool onlyApproved = false;
                 var cultureMaps = new Dictionary<string, Dictionary<int, string>>();
                 foreach (var (code, _) in cultureLayers)
                     cultureMaps[code] = Db.GetTranslationsMap(code, onlyApproved);
@@ -822,20 +888,20 @@ namespace DxfI18N.App
                 // 3) Occorrenze del disegno
                 var occs = Db.GetOccurrencesForDrawing(drawingId);
 
-                // 4) Overlay per OGNI lingua (TEXT, ATTRIB → Text; MTEXT → MText)
+                // 4) Overlay per OGNI lingua
                 foreach (var occ in occs)
                 {
                     foreach (var (code, layerName) in cultureLayers)
                     {
-                        string value = cultureMaps[code].TryGetValue(occ.KeyId, out var tr) && !string.IsNullOrEmpty(tr)
-                                       ? tr
-                                       : occ.DefaultText;
+                        string value = (cultureMaps[code].TryGetValue(occ.KeyId, out var tr) && !string.IsNullOrEmpty(tr))
+                                        ? tr
+                                        : occ.DefaultText;
 
                         if (string.Equals(occ.EntityType, "MTEXT", StringComparison.OrdinalIgnoreCase))
                         {
                             var m = new MText
                             {
-                                Value = value?.Replace("\r", "").Replace("\n", "\\P") ?? "",
+                                Value = (value ?? string.Empty).Replace("\r", "").Replace("\n", "\\P"),
                                 Position = new netDxf.Vector3(occ.PosX, occ.PosY, occ.PosZ),
                                 Height = occ.Height ?? 2.5,
                                 Rotation = occ.Rotation ?? 0.0,
@@ -848,7 +914,7 @@ namespace DxfI18N.App
                         }
                         else
                         {
-                            var t = new Text(value ?? "", new netDxf.Vector2(occ.PosX, occ.PosY), occ.Height ?? 2.5)
+                            var t = new Text(value ?? string.Empty, new netDxf.Vector2(occ.PosX, occ.PosY), occ.Height ?? 2.5)
                             {
                                 Rotation = occ.Rotation ?? 0.0,
                                 Layer = src.Layers[layerName]

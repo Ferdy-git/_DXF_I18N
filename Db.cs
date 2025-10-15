@@ -383,6 +383,31 @@ ORDER BY tk.KeyId;";
                 ins.ExecuteNonQuery();
             }
         }
+        public static List<(int keyId, string defaultText, string culture, string translated, string status)>
+    GetAllPendingForExport()
+        {
+            var list = new List<(int, string, string, string, string)>();
+            using var conn = GetConn(); conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT tk.KeyId,
+       tk.DefaultText,
+       c.Code                               AS Culture,
+       IFNULL(t.Translated,'')              AS Translated,
+       CASE WHEN t.KeyId IS NULL THEN 'Missing'
+            ELSE IFNULL(t.Status,'Draft') END AS Status
+FROM TextKeys tk
+CROSS JOIN Cultures c
+LEFT JOIN Translations t
+       ON t.KeyId = tk.KeyId AND t.CultureCode = c.Code
+WHERE t.KeyId IS NULL
+   OR IFNULL(t.Status,'Draft') <> 'Approved'
+ORDER BY c.Code, tk.KeyId;";
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read())
+                list.Add((rd.GetInt32(0), rd.GetString(1), rd.GetString(2), rd.GetString(3), rd.GetString(4)));
+            return list;
+        }
 
         public static void UpdateStatus(int keyId, string cultureCode, string newStatus)
         {
