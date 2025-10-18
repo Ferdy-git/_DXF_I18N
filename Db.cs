@@ -10,7 +10,11 @@ namespace DxfI18N.App
     {
         private static string? _dbPath;
 
-        public static void SetDatabasePath(string path) => _dbPath = path;
+        public static void SetDatabasePath(string path)
+        {
+            _dbPath = path;
+        }
+
         public static string? GetDatabasePath() => _dbPath;
 
         private static SqliteConnection GetConn()
@@ -26,17 +30,54 @@ namespace DxfI18N.App
             return new SqliteConnection(cs);
         }
 
+        /// <summary>
+        /// Verifica accesso al DB e applica piccole migrazioni automatiche se mancano colonne.
+        /// </summary>
         public static bool QuickHealthCheck()
         {
             using var conn = GetConn();
             conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT 1 FROM Cultures LIMIT 1;";
-            _ = cmd.ExecuteScalar();
+
+            // ping
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT 1;";
+                _ = cmd.ExecuteScalar();
+            }
+
+            // MIGRAZIONE: aggiungi AlignX/AlignY a TextOccurrences se mancanti
+            EnsureColumn(conn, "TextOccurrences", "AlignX", "REAL");
+            EnsureColumn(conn, "TextOccurrences", "AlignY", "REAL");
+
             return true;
         }
 
-        // ===== Liste base =====
+        private static void EnsureColumn(SqliteConnection conn, string table, string column, string type)
+        {
+            using var check = conn.CreateCommand();
+            check.CommandText = $"PRAGMA table_info({table});";
+            using var rd = check.ExecuteReader();
+            bool exists = false;
+            while (rd.Read())
+            {
+                var colName = rd.GetString(1);
+                if (string.Equals(colName, column, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true; break;
+                }
+            }
+            if (!exists)
+            {
+                using var alter = conn.CreateCommand();
+                alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {type};";
+                alter.ExecuteNonQuery();
+            }
+        }
+
+        // =====================================================================
+        //                              LISTE BASE
+        // =====================================================================
+
         public static List<string> GetCultures()
         {
             var list = new List<string>();
@@ -73,7 +114,10 @@ namespace DxfI18N.App
             return list;
         }
 
-        // ===== File hash & drawings =====
+        // =====================================================================
+        //                         DRAWINGS & FILE-HASH
+        // =====================================================================
+
         public static string ComputeFileHash(string filePath)
         {
             using var md5 = MD5.Create();
@@ -97,13 +141,13 @@ namespace DxfI18N.App
 
             using (var ins = conn.CreateCommand())
             {
-                ins.CommandText = @"INSERT INTO Drawings (Path, FileHash, ImportedAt)
-                                    VALUES ($p,$h,datetime('now'));
+                ins.CommandText = @"INSERT INTO Drawings (Path, ImportedAt, FileHash)
+                                    VALUES ($p, datetime('now'), $h);
                                     SELECT last_insert_rowid();";
                 ins.Parameters.AddWithValue("$p", path);
                 ins.Parameters.AddWithValue("$h", fileHash);
-                var newId = ins.ExecuteScalar();
-                return Convert.ToInt32((long)newId!);
+                var id = ins.ExecuteScalar();
+                return Convert.ToInt32((long)id!);
             }
         }
 
@@ -112,7 +156,7 @@ namespace DxfI18N.App
             using var conn = GetConn();
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE Drawings SET FileHash=$h, ImportedAt=datetime('now') WHERE DrawingId=$id;";
+            cmd.CommandText = @"UPDATE Drawings SET FileHash=$h, ImportedAt=datetime('now') WHERE DrawingId=$id;";
             cmd.Parameters.AddWithValue("$h", fileHash);
             cmd.Parameters.AddWithValue("$id", drawingId);
             cmd.ExecuteNonQuery();
@@ -123,13 +167,20 @@ namespace DxfI18N.App
             using var conn = GetConn();
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM TextOccurrences WHERE DrawingId=$id;";
-            cmd.Parameters.AddWithValue("$id", drawingId);
+            cmd.CommandText = @"DELETE FROM TextOccurrences WHERE DrawingId=$d;";
+            cmd.Parameters.AddWithValue("$d", drawingId);
             cmd.ExecuteNonQuery();
         }
 
-        // ===== Keys & Occurrences =====
-        public static int GetOrCreateTextKey(string defaultText, string normalized, string defaultCulture = "it-IT", string? context = null)
+        // =====================================================================
+        //                               TEXT KEYS
+        // =====================================================================
+
+        public static int GetOrCreateTextKey(
+            string defaultText,
+            string? normalized = null,
+            string defaultCulture = "it-IT",
+            string? context = null)
         {
             using var conn = GetConn();
             conn.Open();
@@ -174,6 +225,10 @@ namespace DxfI18N.App
             return Convert.ToInt32((long)newId!);
         }
 
+        // =====================================================================
+        //                            OCCURRENCES: INSERT
+        // =====================================================================
+
         public static void InsertOccurrence(
             int drawingId,
             string entityHandle,
@@ -192,7 +247,9 @@ namespace DxfI18N.App
             string? originalNormalized,
             int? keyId,
             string? blockName = null,
-            string? attribTag = null
+            string? attribTag = null,
+            double? alignX = null,
+            double? alignY = null
         )
         {
             using var conn = GetConn();
@@ -200,9 +257,9 @@ namespace DxfI18N.App
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO TextOccurrences
- (DrawingId, EntityHandle, EntityType, LayerOriginal, PosX, PosY, PosZ, Rotation, Height, Style, WidthFactor, Attachment, WrapWidth, OriginalTextRaw, OriginalTextNormalized, KeyId, BlockName, AttribTag)
+ (DrawingId, EntityHandle, EntityType, LayerOriginal, PosX, PosY, PosZ, Rotation, Height, Style, WidthFactor, Attachment, WrapWidth, OriginalTextRaw, OriginalTextNormalized, KeyId, BlockName, AttribTag, AlignX, AlignY)
  VALUES
- ($d,$h,$t,$l,$x,$y,$z,$rot,$ht,$st,$wf,$att,$ww,$raw,$norm,$key,$blk,$tag);";
+ ($d,$h,$t,$l,$x,$y,$z,$rot,$ht,$st,$wf,$att,$ww,$raw,$norm,$key,$blk,$tag,$ax,$ay);";
             cmd.Parameters.AddWithValue("$d", drawingId);
             cmd.Parameters.AddWithValue("$h", entityHandle);
             cmd.Parameters.AddWithValue("$t", entityType);
@@ -221,10 +278,15 @@ INSERT INTO TextOccurrences
             cmd.Parameters.AddWithValue("$key", (object?)keyId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$blk", (object?)blockName ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$tag", (object?)attribTag ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$ax", (object?)alignX ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$ay", (object?)alignY ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 
-        // ===== Traduzioni / CSV =====
+        // =====================================================================
+        //                              TRANSLATIONS
+        // =====================================================================
+
         public static List<(int keyId, string defaultText)> GetMissingKeysForCulture(string cultureCode)
         {
             var list = new List<(int, string)>();
@@ -284,7 +346,6 @@ ORDER BY tk.KeyId;";
             return list;
         }
 
-        // Export TUTTA la lingua (non solo mancanti)
         public static List<(int keyId, string defaultText, string culture, string translated, string status)>
             GetAllForCultureExport(string cultureCode)
         {
@@ -293,11 +354,9 @@ ORDER BY tk.KeyId;";
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-SELECT tk.KeyId,
-       tk.DefaultText,
-       $c as Culture,
-       IFNULL(t.Translated,'') as Translated,
-       CASE WHEN t.KeyId IS NULL THEN 'Missing' ELSE IFNULL(t.Status,'Draft') END as Status
+SELECT tk.KeyId, tk.DefaultText, $c AS Culture,
+       IFNULL(t.Translated,'') AS Translated,
+       IFNULL(t.Status,'Draft') AS Status
 FROM TextKeys tk
 LEFT JOIN Translations t
   ON t.KeyId = tk.KeyId AND t.CultureCode = $c
@@ -305,73 +364,64 @@ ORDER BY tk.KeyId;";
             cmd.Parameters.AddWithValue("$c", cultureCode);
             using var rd = cmd.ExecuteReader();
             while (rd.Read())
-                list.Add((rd.GetInt32(0), rd.GetString(1), rd.GetString(2), rd.GetString(3), rd.GetString(4)));
+            {
+                list.Add((rd.GetInt32(0), rd.GetString(1), cultureCode,
+                          rd.GetString(3), rd.GetString(4)));
+            }
             return list;
         }
 
-        public static void UpsertTranslation(int keyId, string cultureCode, string translated, string status, bool overwriteApproved)
+        public static void UpsertTranslation(int keyId, string cultureCode, string translated, string? status, bool overwriteApproved)
         {
+            string normStatus = string.IsNullOrWhiteSpace(status) ? "Draft" : status.Trim();
+            int len = translated?.Length ?? 0;
+            int warn = 0;
+
             using var conn = GetConn();
             conn.Open();
 
-            // lunghezza base
-            int baseLen = 0;
-            using (var c1 = conn.CreateCommand())
+            // calcola warn (±20%) contro DefaultText
+            using (var getLen = conn.CreateCommand())
             {
-                c1.CommandText = "SELECT LENGTH(DefaultText) FROM TextKeys WHERE KeyId=$k;";
-                c1.Parameters.AddWithValue("$k", keyId);
-                var obj = c1.ExecuteScalar();
-                if (obj is long l) baseLen = (int)l;
+                getLen.CommandText = "SELECT LENGTH(DefaultText) FROM TextKeys WHERE KeyId=$k;";
+                getLen.Parameters.AddWithValue("$k", keyId);
+                var baseLenObj = getLen.ExecuteScalar();
+                int baseLen = baseLenObj is long l ? (int)l : 0;
+                if (baseLen > 0)
+                {
+                    double diff = Math.Abs(len - baseLen) / (double)baseLen;
+                    warn = diff > 0.20 ? 1 : 0;
+                }
             }
 
-            int len = translated?.Length ?? 0;
-            int warn = 0;
-            if (baseLen > 0)
-            {
-                double diff = Math.Abs(len - baseLen) / (double)baseLen;
-                warn = diff > 0.20 ? 1 : 0; // ±20%
-            }
-
-            // esiste?
-            string? curStatus = null;
-            bool exists;
+            // esiste già?
             using (var chk = conn.CreateCommand())
             {
-                chk.CommandText = "SELECT IFNULL(Status,'') FROM Translations WHERE KeyId=$k AND CultureCode=$c LIMIT 1;";
+                chk.CommandText = "SELECT Status FROM Translations WHERE KeyId=$k AND CultureCode=$c;";
                 chk.Parameters.AddWithValue("$k", keyId);
                 chk.Parameters.AddWithValue("$c", cultureCode);
-                var v = chk.ExecuteScalar();
-                exists = v != null;
-                if (exists) curStatus = Convert.ToString(v);
+                var st = chk.ExecuteScalar() as string;
+
+                if (st != null)
+                {
+                    if (st == "Approved" && !overwriteApproved) return;
+                    using var up = conn.CreateCommand();
+                    up.CommandText = @"UPDATE Translations
+                                       SET Translated=$t, Status=$s, CharCount=$n, OverLengthWarn=$w, UpdatedAt=datetime('now')
+                                       WHERE KeyId=$k AND CultureCode=$c;";
+                    up.Parameters.AddWithValue("$t", translated ?? "");
+                    up.Parameters.AddWithValue("$s", normStatus);
+                    up.Parameters.AddWithValue("$n", len);
+                    up.Parameters.AddWithValue("$w", warn);
+                    up.Parameters.AddWithValue("$k", keyId);
+                    up.Parameters.AddWithValue("$c", cultureCode);
+                    up.ExecuteNonQuery();
+                    return;
+                }
             }
 
-            // protezione Approved
-            if (exists && string.Equals(curStatus, "Approved", StringComparison.OrdinalIgnoreCase) && !overwriteApproved)
-                return;
-
-            string normStatus = string.IsNullOrWhiteSpace(status) ? "Draft" : status.Trim();
-            if (!string.Equals(normStatus, "Approved", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(normStatus, "Draft", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(normStatus, "Blocked", StringComparison.OrdinalIgnoreCase))
-                normStatus = "Draft";
-
-            if (exists)
+            using (var ins = conn.CreateCommand())
             {
-                using var up = conn.CreateCommand();
-                up.CommandText = @"UPDATE Translations
-                                   SET Translated=$t, Status=$s, Notes=NULL, CharCount=$n, OverLengthWarn=$w, UpdatedAt=datetime('now')
-                                   WHERE KeyId=$k AND CultureCode=$c;";
-                up.Parameters.AddWithValue("$t", translated ?? "");
-                up.Parameters.AddWithValue("$s", normStatus);
-                up.Parameters.AddWithValue("$n", len);
-                up.Parameters.AddWithValue("$w", warn);
-                up.Parameters.AddWithValue("$k", keyId);
-                up.Parameters.AddWithValue("$c", cultureCode);
-                up.ExecuteNonQuery();
-            }
-            else
-            {
-                using var ins = conn.CreateCommand();
                 ins.CommandText = @"INSERT INTO Translations (KeyId, CultureCode, Translated, Status, Notes, CharCount, OverLengthWarn, UpdatedAt)
                                     VALUES ($k,$c,$t,$s,NULL,$n,$w,datetime('now'));";
                 ins.Parameters.AddWithValue("$k", keyId);
@@ -382,31 +432,6 @@ ORDER BY tk.KeyId;";
                 ins.Parameters.AddWithValue("$w", warn);
                 ins.ExecuteNonQuery();
             }
-        }
-        public static List<(int keyId, string defaultText, string culture, string translated, string status)>
-    GetAllPendingForExport()
-        {
-            var list = new List<(int, string, string, string, string)>();
-            using var conn = GetConn(); conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-SELECT tk.KeyId,
-       tk.DefaultText,
-       c.Code                               AS Culture,
-       IFNULL(t.Translated,'')              AS Translated,
-       CASE WHEN t.KeyId IS NULL THEN 'Missing'
-            ELSE IFNULL(t.Status,'Draft') END AS Status
-FROM TextKeys tk
-CROSS JOIN Cultures c
-LEFT JOIN Translations t
-       ON t.KeyId = tk.KeyId AND t.CultureCode = c.Code
-WHERE t.KeyId IS NULL
-   OR IFNULL(t.Status,'Draft') <> 'Approved'
-ORDER BY c.Code, tk.KeyId;";
-            using var rd = cmd.ExecuteReader();
-            while (rd.Read())
-                list.Add((rd.GetInt32(0), rd.GetString(1), rd.GetString(2), rd.GetString(3), rd.GetString(4)));
-            return list;
         }
 
         public static void UpdateStatus(int keyId, string cultureCode, string newStatus)
@@ -424,24 +449,9 @@ ORDER BY c.Code, tk.KeyId;";
             cmd.ExecuteNonQuery();
         }
 
-        public static void RecalcWarningsForCulture(string cultureCode)
-        {
-            using var conn = GetConn();
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-UPDATE Translations
-SET CharCount = LENGTH(Translated),
-    OverLengthWarn = CASE
-      WHEN (SELECT LENGTH(DefaultText) FROM TextKeys tk WHERE tk.KeyId = Translations.KeyId) > 0
-       AND ABS(LENGTH(Translated) - (SELECT LENGTH(DefaultText) FROM TextKeys tk WHERE tk.KeyId = Translations.KeyId)) * 1.0
-           / (SELECT LENGTH(DefaultText) FROM TextKeys tk WHERE tk.KeyId = Translations.KeyId) > 0.20
-      THEN 1 ELSE 0 END,
-    UpdatedAt = datetime('now')
-WHERE CultureCode = $c;";
-            cmd.Parameters.AddWithValue("$c", cultureCode);
-            cmd.ExecuteNonQuery();
-        }
+        // =====================================================================
+        //                          OCCURRENCES: READ
+        // =====================================================================
 
         public class OccurrenceRow
         {
@@ -459,6 +469,13 @@ WHERE CultureCode = $c;";
             public string? AttribTag { get; set; }
             public int KeyId { get; set; }
             public string DefaultText { get; set; } = "";
+
+            public double? WidthFactor { get; set; }
+            public string? Attachment { get; set; }
+            public double? WrapWidth { get; set; }
+
+            public double? AlignX { get; set; }
+            public double? AlignY { get; set; }
         }
 
         public static List<OccurrenceRow> GetOccurrencesForDrawing(int drawingId)
@@ -470,7 +487,9 @@ WHERE CultureCode = $c;";
             cmd.CommandText = @"
 SELECT o.DrawingId, o.EntityType, o.LayerOriginal, o.PosX, o.PosY, o.PosZ,
        o.Rotation, o.Height, o.Style, o.EntityHandle, o.BlockName, o.AttribTag,
-       o.KeyId, tk.DefaultText
+       o.KeyId, tk.DefaultText,
+       o.WidthFactor, o.Attachment, o.WrapWidth,
+       o.AlignX, o.AlignY
 FROM TextOccurrences o
 JOIN TextKeys tk ON tk.KeyId = o.KeyId
 WHERE o.DrawingId = $d
@@ -494,7 +513,12 @@ ORDER BY o.OccurrenceId;";
                     BlockName = rd.IsDBNull(10) ? null : rd.GetString(10),
                     AttribTag = rd.IsDBNull(11) ? null : rd.GetString(11),
                     KeyId = rd.GetInt32(12),
-                    DefaultText = rd.GetString(13)
+                    DefaultText = rd.GetString(13),
+                    WidthFactor = rd.IsDBNull(14) ? (double?)null : rd.GetDouble(14),
+                    Attachment = rd.IsDBNull(15) ? null : rd.GetString(15),
+                    WrapWidth = rd.IsDBNull(16) ? (double?)null : rd.GetDouble(16),
+                    AlignX = rd.IsDBNull(17) ? (double?)null : rd.GetDouble(17),
+                    AlignY = rd.IsDBNull(18) ? (double?)null : rd.GetDouble(18),
                 };
                 list.Add(r);
             }

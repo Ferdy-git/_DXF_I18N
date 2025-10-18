@@ -2,29 +2,39 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Reflection; // reflection per AlignmentPoint netDxf
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using CsvHelper;
+
+// ==== LIBRERIA PER L'ANTEPRIMA/IMPORT (come prima) ====
 using netDxf;
 using netDxf.Entities;
 using netDxf.Tables;
+// alias per evitare conflitto con System.Attribute
+using DxfAttribute = netDxf.Entities.Attribute;
+
+// ==== LIBRERIA PER LA GENERAZIONE (NUOVA, precisa) ====
+using iDxf = IxMilia.Dxf;
+using iEnt = IxMilia.Dxf.Entities;
+using iTables = IxMilia.Dxf.Tables;
 
 namespace DxfI18N.App
 {
-    /// <summary>
-    /// Form principale: 3 tab (Importa DXF, Traduzioni, DXF Unico).
-    /// Nota: tutta la UI è definita in Form1.Designer.cs; qui solo logica ed eventi.
-    /// </summary>
     public partial class Form1 : Form
     {
-        // Selezione corrente dei file DXF per l’anteprima/import
         private readonly List<string> _selectedDxfFiles = new();
 
         public Form1()
         {
             InitializeComponent();
 
-            // ----- Hook eventi TAB: Importa DXF -----
+            // Nascondi i controlli “storici” non necessari
+            lblLangOut.Visible = false;
+            cmbCultureGenerate.Visible = false;
+
+            // ----- Importa DXF -----
             btnSelectDb.Click += (s, e) => OnSelectDb();
             btnPickDxf.Click += (s, e) => OnPickDxf();
             btnPreview.Click += (s, e) => OnPreview();
@@ -33,39 +43,30 @@ namespace DxfI18N.App
             btnDeselectAllPreview.Click += (s, e) => OnSelectAllPreview(false);
             btnImport.Click += (s, e) => OnImport();
 
-            // Abilita commit immediato del click sulla colonna ✓
             gridOccurrences.CellContentClick += (s, e) =>
             {
                 if (e.RowIndex >= 0 && e.ColumnIndex == gridOccurrences.Columns["colInclude"].Index)
                     gridOccurrences.CommitEdit(DataGridViewDataErrorContexts.Commit);
             };
 
-            // ----- Hook eventi TAB: Traduzioni -----
+            // ----- Traduzioni -----
             cmbCultureTranslations.SelectedIndexChanged += (s, e) => LoadTranslationsGrid();
             txtFilter.TextChanged += (s, e) => LoadTranslationsGrid();
-
             btnExportCsv.Click += (s, e) => OnExportMissingCsv();
             btnImportCsv.Click += (s, e) => OnImportCsv();
             btnExportLanguage.Click += (s, e) => OnExportWholeLanguage();
-            btnExportAllPending.Click += (s, e) => OnExportAllPending();
             btnSetApproved.Click += (s, e) => OnSetStatusSelected("Approved");
             btnSetDraft.Click += (s, e) => OnSetStatusSelected("Draft");
             btnSetBlocked.Click += (s, e) => OnSetStatusSelected("Blocked");
 
-            // ----- Hook eventi TAB: DXF Unico -----
+            // ----- DXF Unico -----
             btnGenerateUnified.Click += (s, e) => OnGenerateUnified();
 
-            // Griglie: consenti resize manuale colonne
             ConfigureGridForManualResize(gridOccurrences);
             ConfigureGridForManualResize(gridTranslations);
             ConfigureGridForManualResize(gridDrawings);
         }
 
-        // =====================================================================
-        //                                COMUNI
-        // =====================================================================
-
-        /// <summary>Configura una DataGridView per il resize manuale delle colonne.</summary>
         private void ConfigureGridForManualResize(DataGridView g)
         {
             g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
@@ -73,10 +74,8 @@ namespace DxfI18N.App
             g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
         }
 
-        /// <summary>Conversione sicura: object? → double (default 0).</summary>
         private static double SafeToDouble(object? v) => v == null ? 0.0 : Convert.ToDouble(v);
 
-        /// <summary>Conversione sicura: object? → double? (null se non convertibile).</summary>
         private static double? SafeToNullableDouble(object? v)
         {
             if (v == null) return null;
@@ -86,15 +85,14 @@ namespace DxfI18N.App
             try { return Convert.ToDouble(v); } catch { return null; }
         }
 
-        /// <summary>Normalizza testo DXF (gestione base MTEXT, spazi, trim).</summary>
         private static string NormalizeDxfText(string raw, bool isMText)
         {
             if (string.IsNullOrEmpty(raw)) return string.Empty;
             var s = raw;
             if (isMText)
             {
-                s = s.Replace("\\P", "\n");   // newline
-                s = s.Replace("\\~", " ");    // spazio non interrotto
+                s = s.Replace("\\P", "\n");
+                s = s.Replace("\\~", " ");
             }
             s = s.Replace("\r", "");
             var lines = s.Split('\n');
@@ -103,7 +101,6 @@ namespace DxfI18N.App
             return string.Join("\n", lines).Trim();
         }
 
-        /// <summary>Comprimi spazi multipli in singolo spazio, mantenendo il testo.</summary>
         private static string CompressSpaces(string line)
         {
             if (string.IsNullOrEmpty(line)) return string.Empty;
@@ -119,10 +116,9 @@ namespace DxfI18N.App
         }
 
         // =====================================================================
-        //                            TAB: Importa DXF
+        //                           TAB: Importa DXF
         // =====================================================================
 
-        /// <summary>1) Scegli DB SQLite → carica culture, disegni e traduzioni.</summary>
         private void OnSelectDb()
         {
             using var dlg = new OpenFileDialog
@@ -153,7 +149,6 @@ namespace DxfI18N.App
             }
         }
 
-        /// <summary>2) Seleziona uno o più file DXF da analizzare.</summary>
         private void OnPickDxf()
         {
             using var dlg = new OpenFileDialog
@@ -168,7 +163,6 @@ namespace DxfI18N.App
             _selectedDxfFiles.Clear();
             _selectedDxfFiles.AddRange(dlg.FileNames);
 
-            // Rileva l'elenco cumulato dei layer dai file selezionati
             var allLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int filesOk = 0, filesErr = 0;
 
@@ -191,7 +185,6 @@ namespace DxfI18N.App
             lblStatsImport.Text = $"Selezionati: {filesOk} file ({filesErr} errori). Layer trovati: {allLayers.Count}.";
         }
 
-        /// <summary>3) Crea l’anteprima (senza toccare il DB) con filtri e ✓ per selezione.</summary>
         private void OnPreview()
         {
             if (_selectedDxfFiles.Count == 0)
@@ -201,7 +194,6 @@ namespace DxfI18N.App
                 return;
             }
 
-            // Layer inclusi
             var selectedLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < clbLayers.Items.Count; i++)
                 if (clbLayers.GetItemChecked(i))
@@ -220,7 +212,6 @@ namespace DxfI18N.App
                 {
                     var dxf = DxfDocument.Load(file);
 
-                    // TEXT
                     if (includeText && dxf.Entities?.Texts != null)
                     {
                         foreach (var t in dxf.Entities.Texts)
@@ -229,7 +220,7 @@ namespace DxfI18N.App
                             if (selectedLayers.Count > 0 && !selectedLayers.Contains(layer)) continue;
 
                             var raw = t.Value ?? "";
-                            var include = PassesFilters(NormalizeDxfText(raw, isMText: false));
+                            var include = PassesFilters(NormalizeDxfText(raw, false));
 
                             AddPreviewRow(include, file, layer, "TEXT", raw,
                                 t.Position.X, t.Position.Y, t.Rotation, t.Height, t.Style?.Name, t.Handle, null);
@@ -238,7 +229,6 @@ namespace DxfI18N.App
                         }
                     }
 
-                    // MTEXT
                     if (includeMText && dxf.Entities?.MTexts != null)
                     {
                         foreach (var m in dxf.Entities.MTexts)
@@ -247,7 +237,7 @@ namespace DxfI18N.App
                             if (selectedLayers.Count > 0 && !selectedLayers.Contains(layer)) continue;
 
                             var raw = m.Value ?? "";
-                            var include = PassesFilters(NormalizeDxfText(raw, isMText: true));
+                            var include = PassesFilters(NormalizeDxfText(raw, true));
 
                             AddPreviewRow(include, file, layer, "MTEXT", raw,
                                 m.Position.X, m.Position.Y, m.Rotation, m.Height, m.Style?.Name, m.Handle, null);
@@ -256,7 +246,6 @@ namespace DxfI18N.App
                         }
                     }
 
-                    // ATTRIB (attributi di blocco)
                     if (includeAttrib && dxf.Entities?.Inserts != null)
                     {
                         foreach (var ins in dxf.Entities.Inserts)
@@ -271,9 +260,8 @@ namespace DxfI18N.App
 
                                 string tag = a.Tag ?? "";
                                 string raw = a.Value ?? "";
-                                bool include = PassesFilters(NormalizeDxfText(raw, isMText: false));
+                                bool include = PassesFilters(NormalizeDxfText(raw, false));
 
-                                // Alcune versioni non danno Handle per l'attributo → handle derivato
                                 string handle = !string.IsNullOrEmpty(a.Handle) ? a.Handle : $"{ins.Handle}/{tag}";
 
                                 double? aHeight = null, aRot = null;
@@ -298,24 +286,24 @@ namespace DxfI18N.App
                 }
             }
 
-            lblStatsImport.Text = $"Anteprima: file OK {totalFiles}, occorrenze lette {totalOcc}, selezionate {totalShown}.";
+            lblStatsImport.Text = $"Anteprima: file OK {totalFiles}, occorrenze trovate {totalOcc} (mostrate {totalShown}).";
         }
 
-        /// <summary>4) Applica/ri-applica i filtri rapidi alla griglia di anteprima.</summary>
         private void OnApplyFilters()
         {
             int selected = 0;
             foreach (DataGridViewRow row in gridOccurrences.Rows)
             {
-                string text = row.Cells["colOriginalText"]?.Value?.ToString() ?? "";
-                bool include = PassesFilters(NormalizeDxfText(text, isMText: true));
+                string tipo = row.Cells["colEntityType"].Value?.ToString() ?? "";
+                string text = row.Cells["colOriginalText"].Value?.ToString() ?? "";
+                bool isMText = string.Equals(tipo, "MTEXT", StringComparison.OrdinalIgnoreCase);
+                bool include = PassesFilters(NormalizeDxfText(text, isMText));
                 row.Cells["colInclude"].Value = include;
                 if (include) selected++;
             }
             lblStatsImport.Text = $"Anteprima aggiornata: selezionate {selected} di {gridOccurrences.Rows.Count}.";
         }
 
-        /// <summary>Seleziona/Deseleziona tutte le ✓ dell’anteprima.</summary>
         private void OnSelectAllPreview(bool selectAll)
         {
             foreach (DataGridViewRow row in gridOccurrences.Rows)
@@ -323,7 +311,6 @@ namespace DxfI18N.App
             lblStatsImport.Text = $"Selezionate {(selectAll ? gridOccurrences.Rows.Count : 0)} di {gridOccurrences.Rows.Count}.";
         }
 
-        /// <summary>Filtro: solo testi con lettere, lunghezza minima, regex da escludere.</summary>
         private bool PassesFilters(string text)
         {
             string s = text?.Trim() ?? "";
@@ -343,20 +330,18 @@ namespace DxfI18N.App
                 {
                     var rx = p.Trim();
                     if (rx.Length == 0) continue;
-                    try { if (Regex.IsMatch(s, rx)) return false; } catch { /* pattern invalido → ignora */ }
+                    try { if (Regex.IsMatch(s, rx)) return false; } catch { }
                 }
             }
             return true;
         }
 
-        /// <summary>Ritorna true se la stringa contiene almeno una lettera.</summary>
         private static bool HasLetter(string s)
         {
             foreach (var ch in s) if (char.IsLetter(ch)) return true;
             return false;
         }
 
-        /// <summary>Aggiunge una riga alla griglia di anteprima con tutte le colonne compilate.</summary>
         private void AddPreviewRow(
             bool include, string file, string layer, string tipo, string testo,
             double x, double y, double? rot, double? h, string? stile, string handle, int? keyId,
@@ -381,7 +366,6 @@ namespace DxfI18N.App
             r.Cells["colTag"].Value = tag;
         }
 
-        /// <summary>5) Importa nel DB SOLO le righe con ✓, arrotondando PosX/PosY/Rot/Height a 2 decimali.</summary>
         private void OnImport()
         {
             var dbPath = Db.GetDatabasePath();
@@ -398,7 +382,6 @@ namespace DxfI18N.App
                 return;
             }
 
-            // Raggruppa le righe selezionate per file DXF
             var byFile = new Dictionary<string, List<DataGridViewRow>>(StringComparer.OrdinalIgnoreCase);
             foreach (DataGridViewRow r in gridOccurrences.Rows)
             {
@@ -425,13 +408,31 @@ namespace DxfI18N.App
 
                 try
                 {
-                    // Upsert su Drawings
                     string hash = Db.ComputeFileHash(file);
                     int drawingId = Db.UpsertDrawing(file, hash);
                     Db.UpdateDrawingHash(drawingId, hash);
-
-                    // Idempotenza: ripulisci le occorrenze del disegno e reinserisci
                     Db.DeleteOccurrencesForDrawing(drawingId);
+
+                    var dxf = DxfDocument.Load(file);
+
+                    var textByHandle = dxf.Entities.Texts?.Where(t => !string.IsNullOrEmpty(t.Handle))
+                                         .ToDictionary(t => t.Handle!, t => t) ?? new Dictionary<string, Text>();
+                    var mtextByHandle = dxf.Entities.MTexts?.Where(m => !string.IsNullOrEmpty(m.Handle))
+                                         .ToDictionary(m => m.Handle!, m => m) ?? new Dictionary<string, MText>();
+
+                    var attribByHandle = new Dictionary<string, DxfAttribute>();
+                    if (dxf.Entities.Inserts != null)
+                    {
+                        foreach (var ins in dxf.Entities.Inserts)
+                        {
+                            if (ins.Attributes == null) continue;
+                            foreach (var a in ins.Attributes)
+                            {
+                                if (!string.IsNullOrEmpty(a.Handle))
+                                    attribByHandle[a.Handle] = a;
+                            }
+                        }
+                    }
 
                     foreach (var r in rows)
                     {
@@ -450,6 +451,82 @@ namespace DxfI18N.App
                         if (rot.HasValue) rot = Math.Round(rot.Value, 2);
                         if (hgt.HasValue) hgt = Math.Round(hgt.Value, 2);
 
+                        double? widthFactor = null;
+                        string? attachment = null;
+                        double? wrapWidth = null;
+                        double? alignX = null;
+                        double? alignY = null;
+
+                        if (string.Equals(tipo, "TEXT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(handle) && textByHandle.TryGetValue(handle, out var t))
+                            {
+                                widthFactor = t.WidthFactor;
+                                attachment = t.Alignment.ToString();
+
+                                // Reflection: AlignmentPoint se disponibile
+                                if (!string.Equals(attachment, "BaselineLeft", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    try
+                                    {
+                                        var apProp = t.GetType().GetProperty("AlignmentPoint", BindingFlags.Public | BindingFlags.Instance);
+                                        if (apProp != null)
+                                        {
+                                            var ap = apProp.GetValue(t);
+                                            if (ap != null)
+                                            {
+                                                var xProp = ap.GetType().GetProperty("X");
+                                                var yProp = ap.GetType().GetProperty("Y");
+                                                if (xProp != null && yProp != null)
+                                                {
+                                                    alignX = Convert.ToDouble(xProp.GetValue(ap));
+                                                    alignY = Convert.ToDouble(yProp.GetValue(ap));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                        else if (string.Equals(tipo, "MTEXT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(handle) && mtextByHandle.TryGetValue(handle, out var m))
+                            {
+                                wrapWidth = m.RectangleWidth;
+                                attachment = m.AttachmentPoint.ToString();
+                            }
+                        }
+                        else if (string.Equals(tipo, "ATTRIB", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(handle) && attribByHandle.TryGetValue(handle, out var a))
+                            {
+                                try { widthFactor = a.WidthFactor; } catch { }
+                                try { attachment = a.Alignment.ToString(); } catch { }
+
+                                // Posizione world già buona in questa build
+                                x = Math.Round(a.Position.X, 2);
+                                y = Math.Round(a.Position.Y, 2);
+                                alignX = x;
+                                alignY = y;
+
+                                // Rotazione/altezza effettive (ereditano dal blocco)
+                                double aRot = 0.0; try { aRot = a.Rotation; } catch { }
+                                var ins = a.Owner;
+                                double insRot = 0.0; double sy = 1.0;
+                                if (ins != null)
+                                {
+                                    try { insRot = ins.Rotation; } catch { }
+                                    try { sy = ins.Scale.Y; } catch { }
+                                }
+                                rot = Math.Round((rot ?? 0.0) + aRot + insRot, 2);
+                                if (hgt.HasValue) hgt = Math.Round(hgt.Value * sy, 2);
+                            }
+                        }
+
+                        alignX ??= x;
+                        alignY ??= y;
+
                         bool isM = string.Equals(tipo, "MTEXT", StringComparison.OrdinalIgnoreCase);
                         string norm = NormalizeDxfText(raw, isM);
 
@@ -462,9 +539,10 @@ namespace DxfI18N.App
                             layerOriginal: layer,
                             posX: x, posY: y, posZ: 0,
                             rotation: rot, height: hgt, style: stile,
-                            widthFactor: null, attachment: null, wrapWidth: null,
+                            widthFactor: widthFactor, attachment: attachment, wrapWidth: wrapWidth,
                             originalRaw: raw, originalNormalized: norm,
-                            keyId: keyId, blockName: block, attribTag: tag
+                            keyId: keyId, blockName: block, attribTag: tag,
+                            alignX: alignX, alignY: alignY
                         );
 
                         r.Cells["colKeyId"].Value = keyId;
@@ -489,10 +567,9 @@ namespace DxfI18N.App
         }
 
         // =====================================================================
-        //                             TAB: Traduzioni
+        //                           TAB: Traduzioni
         // =====================================================================
 
-        /// <summary>Carica culture/lingue nelle combo dei tab Traduzioni e DXF Unico.</summary>
         private void LoadCulturesIntoCombos()
         {
             cmbCultureTranslations.Items.Clear();
@@ -508,7 +585,6 @@ namespace DxfI18N.App
                 cmbCultureGenerate.Items.Add(c);
             }
 
-            // Default: it-IT se presente
             int idx = cmbCultureTranslations.Items.IndexOf("it-IT");
             cmbCultureTranslations.SelectedIndex = idx >= 0 ? idx : (cmbCultureTranslations.Items.Count > 0 ? 0 : -1);
 
@@ -520,7 +596,6 @@ namespace DxfI18N.App
                 : "Nessuna lingua caricata";
         }
 
-        /// <summary>Popola la grid traduzioni per la lingua selezionata (con filtro testo).</summary>
         private void LoadTranslationsGrid()
         {
             gridTranslations.Rows.Clear();
@@ -542,13 +617,11 @@ namespace DxfI18N.App
                 if (r.warn == 1) warn++;
             }
 
-            // Una passata di auto-resize iniziale, poi resta manuale
             gridTranslations.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
 
             lblStatsTranslations.Text = $"Lingua {culture}: {rows.Count} voci (mancanti {missing}, warning {warn})";
         }
 
-        /// <summary>Esporta SOLO le chiavi mancanti per la lingua selezionata.</summary>
         private void OnExportMissingCsv()
         {
             var dbPath = Db.GetDatabasePath();
@@ -594,8 +667,8 @@ namespace DxfI18N.App
                     csv.WriteField(keyId);
                     csv.WriteField(defaultText);
                     csv.WriteField(culture);
-                    csv.WriteField("");   // da compilare
-                    csv.WriteField("");   // Status opzionale
+                    csv.WriteField("");
+                    csv.WriteField("");
                     csv.NextRecord();
                 }
                 csv.Flush(); sw.Flush();
@@ -609,7 +682,71 @@ namespace DxfI18N.App
             }
         }
 
-        /// <summary>Esporta TUTTE le chiavi (non solo mancanti) per la lingua selezionata.</summary>
+        private void OnImportCsv()
+        {
+            var dbPath = Db.GetDatabasePath();
+            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
+            {
+                MessageBox.Show(this, "Seleziona il database (Scegli DB…).", "MANCANO PREREQUISITI",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using var ofd = new OpenFileDialog
+            {
+                Title = "Importa CSV traduzioni",
+                Filter = "CSV (*.csv)|*.csv|Tutti i file (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false
+            };
+            if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+            int ok = 0, skip = 0, err = 0;
+            try
+            {
+                using var sr = new StreamReader(ofd.FileName);
+                using var csv = new CsvReader(sr, CultureInfo.InvariantCulture);
+
+                while (csv.Read())
+                {
+                    try
+                    {
+                        int keyId = csv.GetField<int>("KeyId");
+                        string culture = csv.TryGetField<string>("Culture", out var c) ? (c ?? "") : "";
+                        string translated = csv.TryGetField<string>("Translated", out var t) ? (t ?? "") : "";
+                        string status = csv.TryGetField<string>("Status", out var s) ? (s ?? "") : "";
+
+                        if (string.IsNullOrWhiteSpace(culture))
+                        {
+                            culture = cmbCultureTranslations.SelectedItem?.ToString() ?? "";
+                        }
+                        if (string.IsNullOrWhiteSpace(culture))
+                        {
+                            skip++;
+                            continue;
+                        }
+
+                        Db.UpsertTranslation(keyId, culture, translated, status, overwriteApproved: chkOverwriteApproved.Checked);
+                        ok++;
+                    }
+                    catch
+                    {
+                        err++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Errore lettura CSV:\n{ex.Message}", "ERRORE",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            LoadTranslationsGrid();
+            MessageBox.Show(this, $"Import CSV completato.\nOK: {ok}\nSaltati: {skip}\nErrori: {err}", "COMPLETATO",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         private void OnExportWholeLanguage()
         {
             var dbPath = Db.GetDatabasePath();
@@ -668,121 +805,7 @@ namespace DxfI18N.App
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-        private void OnExportAllPending()
-        {
-            var dbPath = Db.GetDatabasePath();
-            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
-            {
-                MessageBox.Show(this, "Seleziona il database (Scegli DB…).", "MANCANO PREREQUISITI",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
 
-            var rows = Db.GetAllPendingForExport();
-            if (rows.Count == 0)
-            {
-                MessageBox.Show(this, "Tutto APPROVED: nulla da esportare.", "INFO",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            using var sfd = new SaveFileDialog
-            {
-                Title = "Esporta CSV (tutte le lingue non Approved)",
-                Filter = "CSV (*.csv)|*.csv",
-                FileName = $"translations_pending_all_{DateTime.Now:yyyyMMdd}.csv",
-                OverwritePrompt = true
-            };
-            if (sfd.ShowDialog(this) != DialogResult.OK) return;
-
-            try
-            {
-                using var sw = new StreamWriter(sfd.FileName, false, System.Text.Encoding.UTF8);
-                using var csv = new CsvWriter(sw, CultureInfo.InvariantCulture);
-                csv.WriteField("KeyId"); csv.WriteField("DefaultText"); csv.WriteField("Culture"); csv.WriteField("Translated"); csv.WriteField("Status"); csv.NextRecord();
-                foreach (var r in rows)
-                {
-                    csv.WriteField(r.keyId);
-                    csv.WriteField(r.defaultText);
-                    csv.WriteField(r.culture);
-                    csv.WriteField(r.translated);
-                    csv.WriteField(r.status);
-                    csv.NextRecord();
-                }
-                csv.Flush(); sw.Flush();
-                MessageBox.Show(this, $"Export COMPLETATO.\nRighe: {rows.Count}\n{sfd.FileName}",
-                    "COMPLETATO", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Errore export CSV:\n{ex.Message}", "ERRORE",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        /// <summary>Importa un CSV (può contenere più lingue). Rispetta Status e protezione degli Approved.</summary>
-        private void OnImportCsv()
-        {
-            var dbPath = Db.GetDatabasePath();
-            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
-            {
-                MessageBox.Show(this, "Seleziona il database (Scegli DB…).", "MANCANO PREREQUISITI",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            using var ofd = new OpenFileDialog
-            {
-                Title = "Importa CSV traduzioni",
-                Filter = "CSV (*.csv)|*.csv|Tutti i file (*.*)|*.*",
-                Multiselect = false
-            };
-            if (ofd.ShowDialog(this) != DialogResult.OK) return;
-
-            bool overwriteApproved = chkOverwriteApproved.Checked;
-
-            int ok = 0, err = 0;
-            try
-            {
-                using var sr = new StreamReader(ofd.FileName, System.Text.Encoding.UTF8);
-                using var csv = new CsvReader(sr, CultureInfo.InvariantCulture);
-
-                // Intestazioni
-                csv.Read();
-                csv.ReadHeader();
-
-                while (csv.Read())
-                {
-                    try
-                    {
-                        var keyId = csv.GetField<int>("KeyId");
-                        var culture = (csv.GetField<string>("Culture") ?? "").Trim();
-                        var translated = (csv.GetField<string>("Translated") ?? "").Trim();
-                        csv.TryGetField<string>("Status", out var st);
-                        var status = (st ?? string.Empty).Trim();
-
-                        // Se la traduzione è vuota → ignora la riga (resta "mancante")
-                        if (string.IsNullOrWhiteSpace(culture) || string.IsNullOrWhiteSpace(translated))
-                            continue;
-
-                        Db.UpsertTranslation(keyId, culture, translated, status, overwriteApproved);
-                        ok++;
-                    }
-                    catch { err++; }
-                }
-
-                LoadTranslationsGrid();
-                MessageBox.Show(this, $"Import COMPLETATO.\nOK: {ok}  |  Errori: {err}",
-                    "COMPLETATO", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Errore import CSV:\n{ex.Message}", "ERRORE",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        /// <summary>Imposta lo Status (Approved/Draft/Blocked) sulle righe selezionate.</summary>
         private void OnSetStatusSelected(string newStatus)
         {
             var culture = cmbCultureTranslations.SelectedItem?.ToString();
@@ -808,10 +831,9 @@ namespace DxfI18N.App
         }
 
         // =====================================================================
-        //                              TAB: DXF Unico
+        //                           TAB: DXF Unico (IxMilia)
         // =====================================================================
 
-        /// <summary>Carica la lista dei disegni importati.</summary>
         private void LoadDrawingsGrid()
         {
             gridDrawings.Rows.Clear();
@@ -824,10 +846,9 @@ namespace DxfI18N.App
                 gridDrawings.Rows.Add(id, path, importedAt);
         }
 
-        /// <summary>Genera il DXF unico multilanguage con overlay testo per ogni lingua.</summary>
         private void OnGenerateUnified()
         {
-            // Prendi la riga selezionata (o la prima disponibile)
+            // 1) Riga selezionata (o prima)
             DataGridViewRow? sel = gridDrawings.SelectedRows.Count > 0 ? gridDrawings.SelectedRows[0]
                                   : (gridDrawings.Rows.Count > 0 ? gridDrawings.Rows[0] : null);
             if (sel == null)
@@ -846,17 +867,13 @@ namespace DxfI18N.App
                 return;
             }
 
-            // Conferma: includiamo anche le traduzioni non Approved
-            var ans = MessageBox.Show(this,
-                "Hai controllato i Not Approved?",
-                "Conferma",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (ans == DialogResult.No) return;
+            // Conferma (prendiamo anche non-Approved se la spunta è disattivata)
+            if (MessageBox.Show(this, "Hai controllato i Not Approved?", "Conferma",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.No) return;
 
-            // Cartella di default (creala se manca)
+            // 2) File di uscita
             var defaultDir = @"C:\_ProjNoGit\_DXF_I18N\_DXF";
-            try { Directory.CreateDirectory(defaultDir); } catch { /* ok */ }
-
+            try { Directory.CreateDirectory(defaultDir); } catch { }
             using var sfd = new SaveFileDialog
             {
                 Title = "Salva DXF unico",
@@ -869,68 +886,158 @@ namespace DxfI18N.App
 
             try
             {
+                // 3) Carica il DXF sorgente (netDxf) e indicizza per handle
                 var src = DxfDocument.Load(sourcePath);
 
-                // 1) Layer per lingua (LayerRules: CultureCode, LayerName)
-                var cultureLayers = Db.GetCultureLayers(); // IEnumerable<(string Code, string LayerName)>
-                foreach (var (_, layerName) in cultureLayers)
+                var textByHandle = src.Entities.Texts?
+                    .Where(t => !string.IsNullOrEmpty(t.Handle))
+                    .ToDictionary(t => t.Handle!, t => t)
+                    ?? new Dictionary<string, Text>();
+
+                var mtextByHandle = src.Entities.MTexts?
+                    .Where(m => !string.IsNullOrEmpty(m.Handle))
+                    .ToDictionary(m => m.Handle!, m => m)
+                    ?? new Dictionary<string, MText>();
+
+                // Attributi dentro gli INSERT: mappo handle -> Attribute
+                var attribByHandle = new Dictionary<string, netDxf.Entities.Attribute>();
+                if (src.Entities.Inserts != null)
                 {
-                    if (!src.Layers.Contains(layerName))
-                        src.Layers.Add(new Layer(layerName));
-                }
-
-                // 2) Mappa traduzioni: prendiamo TUTTI (non solo Approved)
-                bool onlyApproved = false;
-                var cultureMaps = new Dictionary<string, Dictionary<int, string>>();
-                foreach (var (code, _) in cultureLayers)
-                    cultureMaps[code] = Db.GetTranslationsMap(code, onlyApproved);
-
-                // 3) Occorrenze del disegno
-                var occs = Db.GetOccurrencesForDrawing(drawingId);
-
-                // 4) Overlay per OGNI lingua
-                foreach (var occ in occs)
-                {
-                    foreach (var (code, layerName) in cultureLayers)
+                    foreach (var ins in src.Entities.Inserts)
                     {
-                        string value = (cultureMaps[code].TryGetValue(occ.KeyId, out var tr) && !string.IsNullOrEmpty(tr))
-                                        ? tr
-                                        : occ.DefaultText;
-
-                        if (string.Equals(occ.EntityType, "MTEXT", StringComparison.OrdinalIgnoreCase))
+                        if (ins.Attributes == null) continue;
+                        foreach (var a in ins.Attributes)
                         {
-                            var m = new MText
-                            {
-                                Value = (value ?? string.Empty).Replace("\r", "").Replace("\n", "\\P"),
-                                Position = new netDxf.Vector3(occ.PosX, occ.PosY, occ.PosZ),
-                                Height = occ.Height ?? 2.5,
-                                Rotation = occ.Rotation ?? 0.0,
-                                Layer = src.Layers[layerName]
-                            };
-                            if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
-                                m.Style = src.TextStyles[occ.Style];
-
-                            src.Entities.Add(m);
-                        }
-                        else
-                        {
-                            var t = new Text(value ?? string.Empty, new netDxf.Vector2(occ.PosX, occ.PosY), occ.Height ?? 2.5)
-                            {
-                                Rotation = occ.Rotation ?? 0.0,
-                                Layer = src.Layers[layerName]
-                            };
-                            if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
-                                t.Style = src.TextStyles[occ.Style];
-
-                            src.Entities.Add(t);
+                            if (!string.IsNullOrEmpty(a.Handle))
+                                attribByHandle[a.Handle] = a;
                         }
                     }
                 }
 
-                // 5) Salva
+                // 4) Assicura i layer di lingua
+                var cultureLayers = Db.GetCultureLayers(); // (Code, LayerName)
+                foreach (var (_, layerName) in cultureLayers)
+                    if (!src.Layers.Contains(layerName))
+                        src.Layers.Add(new Layer(layerName));
+
+                // 5) Mappa traduzioni
+                bool onlyApproved = chkOnlyApprovedGen.Checked;
+                var cultureMaps = new Dictionary<string, Dictionary<int, string>>();
+                foreach (var (code, _) in cultureLayers)
+                    cultureMaps[code] = Db.GetTranslationsMap(code, onlyApproved);
+
+                // 6) Occorrenze del disegno dal DB
+                var occs = Db.GetOccurrencesForDrawing(drawingId);
+
+                // 7) Overlay: per ogni occorrenza e lingua
+                foreach (var occ in occs)
+                {
+                    foreach (var (code, layerName) in cultureLayers)
+                    {
+                        string textOut = cultureMaps[code].TryGetValue(occ.KeyId, out var tr) && !string.IsNullOrEmpty(tr)
+                                         ? tr
+                                         : occ.DefaultText;
+
+                        var layerRef = src.Layers[layerName];
+
+                        if (string.Equals(occ.EntityType, "TEXT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(occ.EntityHandle) && textByHandle.TryGetValue(occ.EntityHandle, out var tOrig))
+                            {
+                                // Clona l’originale: geometria/stile/allineamento identici
+                                var t = (Text)tOrig.Clone();
+                                t.Value = textOut;
+                                t.Layer = layerRef;
+                                src.Entities.Add(t);
+                            }
+                            else
+                            {
+                                // Fallback (se handle mancante): crea TEXT con i valori salvati
+                                var t = new Text(textOut, new netDxf.Vector2(occ.PosX, occ.PosY), occ.Height ?? 2.5)
+                                {
+                                    Rotation = occ.Rotation ?? 0.0,
+                                    Layer = layerRef
+                                };
+                                if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
+                                    t.Style = src.TextStyles[occ.Style];
+                                if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                    Enum.TryParse<TextAlignment>(occ.Attachment, out var ta))
+                                    t.Alignment = ta;
+                                if (occ.WidthFactor.HasValue && occ.WidthFactor.Value > 0)
+                                    t.WidthFactor = occ.WidthFactor.Value;
+                                src.Entities.Add(t);
+                            }
+                        }
+                        else if (string.Equals(occ.EntityType, "MTEXT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(occ.EntityHandle) && mtextByHandle.TryGetValue(occ.EntityHandle, out var mOrig))
+                            {
+                                var m = (MText)mOrig.Clone();
+                                m.Value = (textOut ?? string.Empty).Replace("\r", "").Replace("\n", "\\P");
+                                m.Layer = layerRef;
+                                src.Entities.Add(m);
+                            }
+                            else
+                            {
+                                var m = new MText
+                                {
+                                    Value = (textOut ?? string.Empty).Replace("\r", "").Replace("\n", "\\P"),
+                                    Position = new netDxf.Vector3(occ.PosX, occ.PosY, occ.PosZ),
+                                    Height = occ.Height ?? 2.5,
+                                    Rotation = occ.Rotation ?? 0.0,
+                                    Layer = layerRef
+                                };
+                                if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
+                                    m.Style = src.TextStyles[occ.Style];
+                                if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                    Enum.TryParse<MTextAttachmentPoint>(occ.Attachment, out var ap))
+                                    m.AttachmentPoint = ap;
+                                if (occ.WrapWidth.HasValue && occ.WrapWidth.Value > 0)
+                                    m.RectangleWidth = occ.WrapWidth.Value;
+                                src.Entities.Add(m);
+                            }
+                        }
+                        else // ATTRIB: replica come TEXT con le stesse proprietà "world"
+                        {
+                            if (!string.IsNullOrEmpty(occ.EntityHandle) && attribByHandle.TryGetValue(occ.EntityHandle, out var a))
+                            {
+                                double h = 2.5; try { h = a.Height; } catch { }
+                                double rot = 0.0; try { rot = a.Rotation; } catch { }
+                                var t = new Text(textOut ?? string.Empty, new netDxf.Vector2(a.Position.X, a.Position.Y), h)
+                                {
+                                    Rotation = rot,
+                                    Layer = layerRef
+                                };
+                                if (a.Style != null && src.TextStyles.Contains(a.Style.Name))
+                                    t.Style = src.TextStyles[a.Style.Name];
+                                try { t.Alignment = a.Alignment; } catch { }
+                                try { t.WidthFactor = a.WidthFactor; } catch { }
+                                src.Entities.Add(t);
+                            }
+                            else
+                            {
+                                var t = new Text(textOut ?? string.Empty, new netDxf.Vector2(occ.PosX, occ.PosY), occ.Height ?? 2.5)
+                                {
+                                    Rotation = occ.Rotation ?? 0.0,
+                                    Layer = layerRef
+                                };
+                                if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
+                                    t.Style = src.TextStyles[occ.Style];
+                                if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                    Enum.TryParse<TextAlignment>(occ.Attachment, out var ta))
+                                    t.Alignment = ta;
+                                if (occ.WidthFactor.HasValue && occ.WidthFactor.Value > 0)
+                                    t.WidthFactor = occ.WidthFactor.Value;
+                                src.Entities.Add(t);
+                            }
+                        }
+                    }
+                }
+
+                // 8) Salva
                 src.Save(sfd.FileName);
                 lblGenerateInfo.Text = $"DXF unico creato: {sfd.FileName}";
-                MessageBox.Show(this, $"Generazione COMPLETATA.\nFile: {sfd.FileName}", "COMPLETATO",
+                MessageBox.Show(this, "Generazione COMPLETATA.", "OK",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
