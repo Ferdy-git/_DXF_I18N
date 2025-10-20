@@ -457,6 +457,11 @@ namespace DxfI18N.App
                         double? alignX = null;
                         double? alignY = null;
 
+                        // NEW: dati dell'INSERT (blocchi) — default null per TEXT/MTEXT
+                        string? ownerHandle = null;
+                        double? ix = null, iy = null;
+                        double? irot = null, sx = null, sy = null;
+
                         if (string.Equals(tipo, "TEXT", StringComparison.OrdinalIgnoreCase))
                         {
                             if (!string.IsNullOrEmpty(handle) && textByHandle.TryGetValue(handle, out var t))
@@ -504,32 +509,40 @@ namespace DxfI18N.App
                                 try { widthFactor = a.WidthFactor; } catch { }
                                 try { attachment = a.Alignment.ToString(); } catch { }
 
-                                // Posizione world già buona in questa build
+                                // Posizione "world"
                                 x = Math.Round(a.Position.X, 2);
                                 y = Math.Round(a.Position.Y, 2);
                                 alignX = x;
                                 alignY = y;
 
-                                // Rotazione/altezza effettive (ereditano dal blocco)
-                                double aRot = 0.0; try { aRot = a.Rotation; } catch { }
+                                // Dati dell'INSERT (blocco)
                                 var ins = a.Owner;
-                                double insRot = 0.0; double sy = 1.0;
                                 if (ins != null)
                                 {
-                                    try { insRot = ins.Rotation; } catch { }
+                                    try { ownerHandle = ins.Handle; } catch { }
+                                    try { ix = ins.Position.X; } catch { }
+                                    try { iy = ins.Position.Y; } catch { }
+                                    try { irot = ins.Rotation; } catch { }
+                                    try { sx = ins.Scale.X; } catch { }
                                     try { sy = ins.Scale.Y; } catch { }
                                 }
+
+                                // Rotazione/altezza effettive (ereditano dal blocco)
+                                double aRot = 0.0; try { aRot = a.Rotation; } catch { }
+                                double insRot = irot ?? 0.0;
+                                double scaleY = sy ?? 1.0;
+
                                 rot = Math.Round((rot ?? 0.0) + aRot + insRot, 2);
-                                if (hgt.HasValue) hgt = Math.Round(hgt.Value * sy, 2);
+                                if (hgt.HasValue) hgt = Math.Round(hgt.Value * scaleY, 2);
                             }
                         }
 
+                        // ----- COMUNE: normalizzazione testo + chiave + INSERT nel DB -----
                         alignX ??= x;
                         alignY ??= y;
 
                         bool isM = string.Equals(tipo, "MTEXT", StringComparison.OrdinalIgnoreCase);
                         string norm = NormalizeDxfText(raw, isM);
-
                         int keyId = Db.GetOrCreateTextKey(defaultText: norm, normalized: norm);
 
                         Db.InsertOccurrence(
@@ -542,7 +555,12 @@ namespace DxfI18N.App
                             widthFactor: widthFactor, attachment: attachment, wrapWidth: wrapWidth,
                             originalRaw: raw, originalNormalized: norm,
                             keyId: keyId, blockName: block, attribTag: tag,
-                            alignX: alignX, alignY: alignY
+                            alignX: alignX, alignY: alignY,
+                            // NEW: dati dell'INSERT (blocco)
+                            ownerInsertHandle: ownerHandle,
+                            insertX: ix, insertY: iy,
+                            insertRotation: irot,
+                            insertScaleX: sx, insertScaleY: sy
                         );
 
                         r.Cells["colKeyId"].Value = keyId;
@@ -997,42 +1015,49 @@ namespace DxfI18N.App
                                 src.Entities.Add(m);
                             }
                         }
-                        else // ATTRIB: replica come TEXT con le stesse proprietà "world"
+                        else // ATTRIB
                         {
-                            if (!string.IsNullOrEmpty(occ.EntityHandle) && attribByHandle.TryGetValue(occ.EntityHandle, out var a))
+                            // Dati "world" già salvati in import
+                            double px = occ.PosX, py = occ.PosY;
+                            double ax = occ.AlignX ?? px, ay = occ.AlignY ?? py;
+
+                            double outHeight = occ.Height ?? 2.5;
+                            double outRotation = occ.Rotation ?? 0.0;
+
+                            string? styleName = occ.Style;
+                            double? widthFactorOut = occ.WidthFactor;
+
+                            // Decodifica allineamento dal DB
+                            TextAlignment? alignOut = null;
+                            if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                Enum.TryParse<TextAlignment>(occ.Attachment, out var ta))
+                                alignOut = ta;
+
+                            // Se non è BaselineLeft, usa il punto di allineamento come Position
+                            var anchor = (alignOut.HasValue && alignOut.Value != TextAlignment.BaselineLeft)
+                                         ? new netDxf.Vector2(ax, ay)
+                                         : new netDxf.Vector2(px, py);
+
+                            var t = new Text(textOut ?? string.Empty, anchor, outHeight)
                             {
-                                double h = 2.5; try { h = a.Height; } catch { }
-                                double rot = 0.0; try { rot = a.Rotation; } catch { }
-                                var t = new Text(textOut ?? string.Empty, new netDxf.Vector2(a.Position.X, a.Position.Y), h)
-                                {
-                                    Rotation = rot,
-                                    Layer = layerRef
-                                };
-                                if (a.Style != null && src.TextStyles.Contains(a.Style.Name))
-                                    t.Style = src.TextStyles[a.Style.Name];
-                                try { t.Alignment = a.Alignment; } catch { }
-                                try { t.WidthFactor = a.WidthFactor; } catch { }
-                                src.Entities.Add(t);
-                            }
-                            else
-                            {
-                                var t = new Text(textOut ?? string.Empty, new netDxf.Vector2(occ.PosX, occ.PosY), occ.Height ?? 2.5)
-                                {
-                                    Rotation = occ.Rotation ?? 0.0,
-                                    Layer = layerRef
-                                };
-                                if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
-                                    t.Style = src.TextStyles[occ.Style];
-                                if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
-                                    Enum.TryParse<TextAlignment>(occ.Attachment, out var ta))
-                                    t.Alignment = ta;
-                                if (occ.WidthFactor.HasValue && occ.WidthFactor.Value > 0)
-                                    t.WidthFactor = occ.WidthFactor.Value;
-                                src.Entities.Add(t);
-                            }
+                                Rotation = outRotation,
+                                Layer = layerRef
+                            };
+
+                            if (!string.IsNullOrWhiteSpace(styleName) && src.TextStyles.Contains(styleName))
+                                t.Style = src.TextStyles[styleName];
+
+                            if (alignOut.HasValue)
+                                t.Alignment = alignOut.Value;   // niente AlignmentPoint: questa versione non lo espone
+
+                            if (widthFactorOut.HasValue && widthFactorOut.Value > 0)
+                                t.WidthFactor = widthFactorOut.Value;
+
+                            src.Entities.Add(t);
                         }
                     }
                 }
+                
 
                 // 8) Salva
                 src.Save(sfd.FileName);

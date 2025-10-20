@@ -45,9 +45,15 @@ namespace DxfI18N.App
                 _ = cmd.ExecuteScalar();
             }
 
-            // MIGRAZIONE: aggiungi AlignX/AlignY a TextOccurrences se mancanti
+            // MIGRAZIONI MINIME
             EnsureColumn(conn, "TextOccurrences", "AlignX", "REAL");
             EnsureColumn(conn, "TextOccurrences", "AlignY", "REAL");
+            EnsureColumn(conn, "TextOccurrences", "OwnerInsertHandle", "TEXT");
+            EnsureColumn(conn, "TextOccurrences", "InsertX", "REAL");
+            EnsureColumn(conn, "TextOccurrences", "InsertY", "REAL");
+            EnsureColumn(conn, "TextOccurrences", "InsertRotation", "REAL");
+            EnsureColumn(conn, "TextOccurrences", "InsertScaleX", "REAL");
+            EnsureColumn(conn, "TextOccurrences", "InsertScaleY", "REAL");
 
             return true;
         }
@@ -249,7 +255,13 @@ namespace DxfI18N.App
             string? blockName = null,
             string? attribTag = null,
             double? alignX = null,
-            double? alignY = null
+            double? alignY = null,
+            string? ownerInsertHandle = null,
+            double? insertX = null,
+            double? insertY = null,
+            double? insertRotation = null,
+            double? insertScaleX = null,
+            double? insertScaleY = null
         )
         {
             using var conn = GetConn();
@@ -257,9 +269,9 @@ namespace DxfI18N.App
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO TextOccurrences
- (DrawingId, EntityHandle, EntityType, LayerOriginal, PosX, PosY, PosZ, Rotation, Height, Style, WidthFactor, Attachment, WrapWidth, OriginalTextRaw, OriginalTextNormalized, KeyId, BlockName, AttribTag, AlignX, AlignY)
- VALUES
- ($d,$h,$t,$l,$x,$y,$z,$rot,$ht,$st,$wf,$att,$ww,$raw,$norm,$key,$blk,$tag,$ax,$ay);";
+ (DrawingId, EntityHandle, EntityType, LayerOriginal, PosX, PosY, PosZ, Rotation, Height, Style, WidthFactor, Attachment, WrapWidth, OriginalTextRaw, OriginalTextNormalized, KeyId, BlockName, AttribTag, AlignX, AlignY, OwnerInsertHandle, InsertX, InsertY, InsertRotation, InsertScaleX, InsertScaleY)
+VALUES
+ ($d,$h,$t,$l,$x,$y,$z,$rot,$ht,$st,$wf,$att,$ww,$raw,$norm,$key,$blk,$tag,$ax,$ay,$owner,$ix,$iy,$irot,$sx,$sy);";
             cmd.Parameters.AddWithValue("$d", drawingId);
             cmd.Parameters.AddWithValue("$h", entityHandle);
             cmd.Parameters.AddWithValue("$t", entityType);
@@ -280,6 +292,12 @@ INSERT INTO TextOccurrences
             cmd.Parameters.AddWithValue("$tag", (object?)attribTag ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$ax", (object?)alignX ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$ay", (object?)alignY ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$owner", (object?)ownerInsertHandle ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$ix", insertX ?? 0.0);
+            cmd.Parameters.AddWithValue("$iy", insertY ?? 0.0);
+            cmd.Parameters.AddWithValue("$irot", insertRotation ?? 0.0);
+            cmd.Parameters.AddWithValue("$sx", insertScaleX ?? 1.0);
+            cmd.Parameters.AddWithValue("$sy", insertScaleY ?? 1.0);
             cmd.ExecuteNonQuery();
         }
 
@@ -476,6 +494,14 @@ ORDER BY tk.KeyId;";
 
             public double? AlignX { get; set; }
             public double? AlignY { get; set; }
+
+            // NEW: parametri INSERT (blocchi)
+            public string? OwnerInsertHandle { get; set; }
+            public double? InsertX { get; set; }
+            public double? InsertY { get; set; }
+            public double? InsertRotation { get; set; }
+            public double? InsertScaleX { get; set; }
+            public double? InsertScaleY { get; set; }
         }
 
         public static List<OccurrenceRow> GetOccurrencesForDrawing(int drawingId)
@@ -489,7 +515,8 @@ SELECT o.DrawingId, o.EntityType, o.LayerOriginal, o.PosX, o.PosY, o.PosZ,
        o.Rotation, o.Height, o.Style, o.EntityHandle, o.BlockName, o.AttribTag,
        o.KeyId, tk.DefaultText,
        o.WidthFactor, o.Attachment, o.WrapWidth,
-       o.AlignX, o.AlignY
+       o.AlignX, o.AlignY,
+       o.OwnerInsertHandle, o.InsertX, o.InsertY, o.InsertRotation, o.InsertScaleX, o.InsertScaleY
 FROM TextOccurrences o
 JOIN TextKeys tk ON tk.KeyId = o.KeyId
 WHERE o.DrawingId = $d
@@ -519,6 +546,14 @@ ORDER BY o.OccurrenceId;";
                     WrapWidth = rd.IsDBNull(16) ? (double?)null : rd.GetDouble(16),
                     AlignX = rd.IsDBNull(17) ? (double?)null : rd.GetDouble(17),
                     AlignY = rd.IsDBNull(18) ? (double?)null : rd.GetDouble(18),
+
+                    // NEW: mapping INSERT
+                    OwnerInsertHandle = rd.IsDBNull(19) ? null : rd.GetString(19),
+                    InsertX = rd.IsDBNull(20) ? (double?)null : rd.GetDouble(20),
+                    InsertY = rd.IsDBNull(21) ? (double?)null : rd.GetDouble(21),
+                    InsertRotation = rd.IsDBNull(22) ? (double?)null : rd.GetDouble(22),
+                    InsertScaleX = rd.IsDBNull(23) ? (double?)null : rd.GetDouble(23),
+                    InsertScaleY = rd.IsDBNull(24) ? (double?)null : rd.GetDouble(24),
                 };
                 list.Add(r);
             }
