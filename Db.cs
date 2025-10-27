@@ -304,6 +304,58 @@ VALUES
         // =====================================================================
         //                              TRANSLATIONS
         // =====================================================================
+        public static void BackupDatabase(string destinationPath)
+        {
+            var src = GetDatabasePath();
+            if (string.IsNullOrWhiteSpace(src) || !File.Exists(src))
+                throw new InvalidOperationException("Percorso DB non valido.");
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+            File.Copy(src, destinationPath, overwrite: true);
+        }
+
+        public static void CleanAllData(bool keepCultures = true)
+        {
+            using var conn = GetConn(); conn.Open();
+            using (var tx = conn.BeginTransaction())
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+
+                // Elimina in ordine (figli → genitori)
+                cmd.CommandText = @"
+DELETE FROM Translations;
+DELETE FROM TextOccurrences;
+DELETE FROM Drawings;
+DELETE FROM TextKeys;";
+                cmd.ExecuteNonQuery();
+
+                if (!keepCultures)
+                {
+                    cmd.CommandText = "DELETE FROM Cultures;";
+                    cmd.ExecuteNonQuery();
+                }
+
+                // AZZERA i contatori AUTOINCREMENT (se presenti)
+                try
+                {
+                    cmd.CommandText = "DELETE FROM sqlite_sequence WHERE name IN ('TextKeys','Drawings','TextOccurrences','Translations');";
+                    cmd.ExecuteNonQuery();
+                }
+                catch
+                {
+                    // ignora: sqlite_sequence non esiste se nessuna tabella usa AUTOINCREMENT
+                }
+
+                tx.Commit();
+            }
+
+            // Compatta il DB
+            using var conn2 = GetConn(); conn2.Open();
+            using var vacuum = conn2.CreateCommand();
+            vacuum.CommandText = "VACUUM;";
+            vacuum.ExecuteNonQuery();
+        }
+
 
         public static List<(int keyId, string defaultText)> GetMissingKeysForCulture(string cultureCode)
         {

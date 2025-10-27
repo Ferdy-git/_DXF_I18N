@@ -27,6 +27,7 @@ namespace DxfI18N.App
         private Button btnSelectAllPreview;
         private Button btnDeselectAllPreview;
         private Button btnImport;
+        private Button btnCleanDb;
 
         private CheckedListBox clbLayers;
         private CheckBox chkText;
@@ -86,6 +87,7 @@ namespace DxfI18N.App
         private ComboBox cmbCultureGenerate;
         private CheckBox chkOnlyApprovedGen;
         private Button btnGenerateUnified;
+        private Button btnGenerateSingle;
         private Label lblGenerateInfo;
         private DataGridView gridDrawings;
         private DataGridViewTextBoxColumn colDrawingId;
@@ -127,6 +129,7 @@ namespace DxfI18N.App
             btnSelectAllPreview = new Button { Name = "btnSelectAllPreview", Text = "Seleziona tutti", Location = new Point(480, 10), Size = new Size(110, 30) };
             btnDeselectAllPreview = new Button { Name = "btnDeselectAllPreview", Text = "Deseleziona tutti", Location = new Point(600, 10), Size = new Size(120, 30) };
             btnImport = new Button { Name = "btnImport", Text = "Importa selezionati", Location = new Point(730, 10), Size = new Size(140, 30) };
+            btnCleanDb = new Button { Name = "btnCleanDb", Text = "Clean DB", Location = new Point(880, 10), Size = new Size(100, 30) };
 
             clbLayers = new CheckedListBox { Name = "clbLayers", Location = new Point(10, 50), Size = new Size(260, 95), CheckOnClick = true };
 
@@ -142,12 +145,15 @@ namespace DxfI18N.App
             txtExcludePatterns = new TextBox { Name = "txtExcludePatterns", Location = new Point(580, 80), Size = new Size(300, 23) };
             txtExcludePatterns.PlaceholderText = @"^\d+$;^\+?\d+V$;^J\d+$;^\d+mm$;^(BK|BN|RD|OG|YE|GN|BU|VT|GY|WH|PK|GNYE)$";
 
-            lblStatsImport = new Label { Name = "lblStatsImport", Text = "—", AutoSize = true, Location = new Point(900, 15), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            lblStatsImport = new Label { Name = "lblStatsImport", Text = "—", AutoSize = true, Location = new Point(990, 15), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+
 
             panelTopImport.Controls.AddRange(new Control[] {
                 btnSelectDb, btnPickDxf, btnPreview, btnApplyFilters, btnSelectAllPreview, btnDeselectAllPreview, btnImport,
+                btnCleanDb,  
                 clbLayers, chkText, chkMText, chkAttrib, chkOnlyLetters, numMinLen, lblMin, lblPat, txtExcludePatterns, lblStatsImport
             });
+
 
             // ====== IMPORTA DXF (griglia) ======
             gridOccurrences = new DataGridView
@@ -255,6 +261,25 @@ namespace DxfI18N.App
 
             panelTopUnified.Controls.AddRange(new Control[] {
                 lblLangOut, cmbCultureGenerate, chkOnlyApprovedGen, btnGenerateUnified, lblGenerateInfo
+            });
+            // ====== DXF UNICO (pannello alto) ======
+            panelTopUnified = new Panel { Dock = DockStyle.Top, Height = 86 };
+
+            lblLangOut = new Label { Text = "Lingua attiva:", AutoSize = true, Location = new Point(10, 12) };
+            cmbCultureGenerate = new ComboBox { Name = "cmbCultureGenerate", DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(100, 8), Width = 140 };
+
+            chkOnlyApprovedGen = new CheckBox { Name = "chkOnlyApprovedGen", Text = "Usa solo traduzioni Approved", AutoSize = true, Location = new Point(260, 10) };
+            btnGenerateUnified = new Button { Name = "btnGenerateUnified", Text = "Genera DXF multi…", Size = new Size(160, 28), Location = new Point(10, 46) };
+
+            // NEW: bottone per singola lingua
+            btnGenerateSingle = new Button { Name = "btnGenerateSingle", Text = "Genera DXF (lingua)…", Size = new Size(170, 28), Location = new Point(180, 46) };
+
+            // Sposto la label info un po' più a destra
+            lblGenerateInfo = new Label { Name = "lblGenerateInfo", Text = "—", AutoSize = true, Location = new Point(360, 50) };
+
+            panelTopUnified.Controls.AddRange(new Control[] {
+            lblLangOut, cmbCultureGenerate, chkOnlyApprovedGen,
+            btnGenerateUnified, btnGenerateSingle, lblGenerateInfo
             });
 
             // ====== DXF UNICO (griglia) ======

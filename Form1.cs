@@ -1,20 +1,20 @@
-﻿using System;
+﻿using CsvHelper;
+using CsvHelper.Configuration;
+// ==== LIBRERIA PER L'ANTEPRIMA/IMPORT (come prima) ====
+using netDxf;
+using netDxf.Entities;
+using netDxf.Tables;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection; // reflection per AlignmentPoint netDxf
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
-using CsvHelper;
-
-// ==== LIBRERIA PER L'ANTEPRIMA/IMPORT (come prima) ====
-using netDxf;
-using netDxf.Entities;
-using netDxf.Tables;
 // alias per evitare conflitto con System.Attribute
 using DxfAttribute = netDxf.Entities.Attribute;
-
 // ==== LIBRERIA PER LA GENERAZIONE (NUOVA, precisa) ====
 using iDxf = IxMilia.Dxf;
 using iEnt = IxMilia.Dxf.Entities;
@@ -30,9 +30,38 @@ namespace DxfI18N.App
         {
             InitializeComponent();
 
-            // Nascondi i controlli “storici” non necessari
-            lblLangOut.Visible = false;
-            cmbCultureGenerate.Visible = false;
+            // === DXF Unico: mostra i controlli lingua e aggiungi il bottone per singola lingua ===
+            try
+            {
+                lblLangOut.Visible = true;           // era false
+                cmbCultureGenerate.Visible = true;    // era false
+
+                // Crea/riusa un bottone accanto a "Genera DXF unico"
+                var found = this.Controls.Find("btnGenerateSingle", true);
+                Button btnGenerateSingle;
+                if (found.Length > 0)
+                {
+                    btnGenerateSingle = (Button)found[0];
+                }
+                else
+                {
+                    var parent = btnGenerateUnified.Parent ?? this;
+                    btnGenerateSingle = new Button
+                    {
+                        Name = "btnGenerateSingle",
+                        Text = "Genera DXF (lingua)…",
+                        Size = btnGenerateUnified.Size,
+                        Location = new System.Drawing.Point(btnGenerateUnified.Right + 10, btnGenerateUnified.Top),
+                        Anchor = btnGenerateUnified.Anchor,
+                        TabIndex = btnGenerateUnified.TabIndex + 1,
+                    };
+                    parent.Controls.Add(btnGenerateSingle);
+                }
+
+                // Hook all'handler esistente
+                btnGenerateSingle.Click += (s, e) => OnGenerateSingle();
+            }
+            catch { /* se i controlli non ci sono in questa vista, ignora */ }
 
             // ----- Importa DXF -----
             btnSelectDb.Click += (s, e) => OnSelectDb();
@@ -42,7 +71,7 @@ namespace DxfI18N.App
             btnSelectAllPreview.Click += (s, e) => OnSelectAllPreview(true);
             btnDeselectAllPreview.Click += (s, e) => OnSelectAllPreview(false);
             btnImport.Click += (s, e) => OnImport();
-
+            btnCleanDb.Click += OnCleanDb_Click;
             gridOccurrences.CellContentClick += (s, e) =>
             {
                 if (e.RowIndex >= 0 && e.ColumnIndex == gridOccurrences.Columns["colInclude"].Index)
@@ -115,6 +144,186 @@ namespace DxfI18N.App
             return res.ToString().Trim();
         }
 
+        // ----------------- NUOVI HELPER per entità dentro i blocchi -----------------
+
+        // Trasforma un punto locale del blocco nelle coordinate world dell'INSERT
+        // Costruisce la matrice di trasformazione dell'INSERT (Scala → Rotazione Z → Traslazione)
+        //private static netDxf.Matrix3 InsertTransform(netDxf.Entities.Insert ins)
+        //{
+        //    var sx = ins.Scale.X == 0 ? 1.0 : ins.Scale.X;
+        //    var sy = ins.Scale.Y == 0 ? 1.0 : ins.Scale.Y;
+        //    var s = netDxf.Matrix3.Scale(sx, sy, 1.0);
+
+        //    var r = netDxf.Matrix3.RotationZ(netDxf.MathHelper.DegToRad(ins.Rotation));
+        //    var t = netDxf.Matrix3.Translation(ins.Position.X, ins.Position.Y, 0.0);
+
+        //    // ordine: scala → ruota → trasla
+        //    return t * r * s;
+        //}
+
+        // Clona un'entità testuale del blocco e la trasforma nello spazio mondo dell'INSERT
+        // Restituisce null se non trovata.
+        //private static netDxf.Entities.EntityObject? CloneAndTransformBlockText(
+        //    netDxf.DxfDocument src, string insertHandle, string innerHandle, string textOut, netDxf.Tables.Layer layerRef)
+        //{
+        //    var ins = src.Entities.Inserts?.FirstOrDefault(i => string.Equals(i.Handle, insertHandle, StringComparison.OrdinalIgnoreCase));
+        //    if (ins == null || ins.Block == null) return null;
+
+        //    // cerca prima MTEXT poi TEXT
+        //    var mInner = ins.Block.Entities.OfType<netDxf.Entities.MText>()
+        //                  .FirstOrDefault(e => string.Equals(e.Handle, innerHandle, StringComparison.OrdinalIgnoreCase));
+        //    if (mInner != null)
+        //    {
+        //        var clone = (netDxf.Entities.MText)mInner.Clone();
+        //        clone.Layer = layerRef;
+        //        clone.Value = (textOut ?? "").Replace("\r", "").Replace("\n", "\\P");
+        //        // importantissimo: trasformazione completa dell'INSERT
+        //        clone.TransformBy(InsertTransform(ins));
+        //        return clone;
+        //    }
+
+        //    var tInner = ins.Block.Entities.OfType<netDxf.Entities.Text>()
+        //                  .FirstOrDefault(e => string.Equals(e.Handle, innerHandle, StringComparison.OrdinalIgnoreCase));
+        //    if (tInner != null)
+        //    {
+        //        var clone = (netDxf.Entities.Text)tInner.Clone();
+        //        clone.Layer = layerRef;
+        //        clone.Value = textOut ?? "";
+        //        clone.TransformBy(InsertTransform(ins));
+        //        return clone;
+        //    }
+
+        //    return null;
+        //}
+        // Clona l'entità (MTEXT/TEXT) dal BlockDefinition e la porta nello spazio world dell'INSERT
+        // Clona l'entità (MTEXT/TEXT) dal BlockDefinition e la porta nello spazio world dell'INSERT
+        private static netDxf.Entities.EntityObject? CloneAndTransformBlockText(
+            netDxf.DxfDocument src, string insertHandle, string innerHandle, string textOut, netDxf.Tables.Layer layerRef)
+        {
+            var ins = src.Entities.Inserts?.FirstOrDefault(i => string.Equals(i.Handle, insertHandle, StringComparison.OrdinalIgnoreCase));
+            if (ins == null || ins.Block == null) return null;
+
+            // ---------- 1) MTEXT nel blocco ----------
+            var mInner = ins.Block.Entities.OfType<netDxf.Entities.MText>()
+                .FirstOrDefault(e => string.Equals(e.Handle, innerHandle, StringComparison.OrdinalIgnoreCase));
+            if (mInner != null)
+            {
+                var clone = (netDxf.Entities.MText)mInner.Clone();
+                clone.Layer = layerRef;
+                clone.Value = (textOut ?? string.Empty).Replace("\r", "").Replace("\n", "\\P");
+
+                // posizione world (Position è Vector3)
+                var wp = TransformPoint2D(new netDxf.Vector2(clone.Position.X, clone.Position.Y), ins);
+                clone.Position = new netDxf.Vector3(wp.X, wp.Y, clone.Position.Z);
+
+                // rotazione e scala (altezza su Y, larghezza su X)
+                clone.Rotation = clone.Rotation + ins.Rotation;
+                double sy = ins.Scale.Y == 0 ? 1.0 : ins.Scale.Y;
+                double sx = ins.Scale.X == 0 ? 1.0 : ins.Scale.X;
+                clone.Height *= sy;
+                if (clone.RectangleWidth > 0) clone.RectangleWidth *= sx;
+
+                return clone;
+            }
+
+            // ---------- 2) TEXT nel blocco ----------
+            var tInner = ins.Block.Entities.OfType<netDxf.Entities.Text>()
+                .FirstOrDefault(e => string.Equals(e.Handle, innerHandle, StringComparison.OrdinalIgnoreCase));
+            if (tInner != null)
+            {
+                var clone = (netDxf.Entities.Text)tInner.Clone();
+                clone.Layer = layerRef;
+                clone.Value = textOut ?? string.Empty;
+
+                // --- Position: può essere Vector2 o Vector3 a seconda della versione ---
+                var posProp = typeof(netDxf.Entities.Text).GetProperty("Position", BindingFlags.Public | BindingFlags.Instance);
+                if (posProp != null)
+                {
+                    var posObj = posProp.GetValue(clone);
+                    if (posObj is netDxf.Vector3 p3)
+                    {
+                        var wp = TransformPoint2D(new netDxf.Vector2(p3.X, p3.Y), ins);
+                        posProp.SetValue(clone, new netDxf.Vector3(wp.X, wp.Y, p3.Z));
+                    }
+                    else if (posObj is netDxf.Vector2 p2)
+                    {
+                        var wp = TransformPoint2D(p2, ins);
+                        posProp.SetValue(clone, new netDxf.Vector2(wp.X, wp.Y));
+                    }
+                }
+
+                // rotazione/altezza
+                clone.Rotation = clone.Rotation + ins.Rotation;
+                double sy = ins.Scale.Y == 0 ? 1.0 : ins.Scale.Y;
+                clone.Height *= sy;
+
+                // --- AlignmentPoint: può essere Vector2 o Vector3 ---
+                if (clone.Alignment != netDxf.Entities.TextAlignment.BaselineLeft)
+                {
+                    var apProp = typeof(netDxf.Entities.Text).GetProperty("AlignmentPoint", BindingFlags.Public | BindingFlags.Instance);
+                    if (apProp != null)
+                    {
+                        var apObj = apProp.GetValue(clone);
+                        if (apObj is netDxf.Vector3 ap3)
+                        {
+                            var apW = TransformPoint2D(new netDxf.Vector2(ap3.X, ap3.Y), ins);
+                            apProp.SetValue(clone, new netDxf.Vector3(apW.X, apW.Y, ap3.Z));
+                        }
+                        else if (apObj is netDxf.Vector2 ap2)
+                        {
+                            var apW = TransformPoint2D(ap2, ins);
+                            apProp.SetValue(clone, new netDxf.Vector2(apW.X, apW.Y));
+                        }
+                    }
+                }
+
+                return clone;
+            }
+
+            return null;
+        }
+
+
+        private static void EnsureTextAlignmentPoint(netDxf.Entities.Text t)
+        {
+            if (t == null) return;
+            if (t.Alignment == netDxf.Entities.TextAlignment.BaselineLeft) return;
+
+            // imposta anche i codici 11/21 = alignment point
+            var apProp = t.GetType().GetProperty("AlignmentPoint", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (apProp != null)
+            {
+                var p = t.Position; // abbiamo già messo l'anchor qui
+                apProp.SetValue(t, new netDxf.Vector2(p.X, p.Y));
+            }
+
+            // opzionale: normal sempre Z+
+            try { t.Normal = new netDxf.Vector3(0, 0, 1); } catch { }
+        }
+
+        private static netDxf.Vector2 TransformPoint2D(netDxf.Vector2 p, netDxf.Entities.Insert ins)
+        {
+            double sx = ins.Scale.X, sy = ins.Scale.Y;
+            double ang = (ins.Rotation) * Math.PI / 180.0;
+
+            double x = p.X * sx;
+            double y = p.Y * sy;
+
+            double xr = x * Math.Cos(ang) - y * Math.Sin(ang);
+            double yr = x * Math.Sin(ang) + y * Math.Cos(ang);
+
+            return new netDxf.Vector2(xr + ins.Position.X, yr + ins.Position.Y);
+        }
+
+        // Layer "effettivo": se l'entità del blocco è su layer "0", eredita il layer dell'INSERT
+        private static string EffectiveLayer(netDxf.Tables.Layer? entLayer, netDxf.Entities.Insert ins)
+        {
+            var l = entLayer?.Name ?? "";
+            if (string.Equals(l, "0", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(l))
+                l = ins.Layer?.Name ?? l;
+            return l ?? "";
+        }
+
         // =====================================================================
         //                           TAB: Importa DXF
         // =====================================================================
@@ -147,6 +356,79 @@ namespace DxfI18N.App
                 MessageBox.Show(this, $"Errore DB:\n{ex.Message}", "ERRORE",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+        private void OnCleanDb_Click(object? sender, EventArgs e) => OnCleanDb();
+
+        /// <summary>
+        /// Pulisce completamente i dati (Translations, Occurrences, Drawings, TextKeys).
+        /// Mantiene le culture. Offre un backup del DB prima di procedere.
+        /// </summary>
+        private void OnCleanDb()
+        {
+            var dbPath = Db.GetDatabasePath();
+            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
+            {
+                MessageBox.Show(this, "Seleziona prima un database (Scegli DB…).", "MANCANO PREREQUISITI",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var res = MessageBox.Show(this,
+                "Cancella TUTTI i dati: chiavi, occorrenze, disegni e traduzioni.\n" +
+                "Le lingue (Cultures) restano.\n\nVuoi fare prima un backup del DB?",
+                "Clean DB — Conferma",
+                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button3);
+
+            if (res == DialogResult.Cancel) return;
+
+            if (res == DialogResult.Yes)
+            {
+                using var sfd = new SaveFileDialog
+                {
+                    Title = "Salva backup del database",
+                    Filter = "SQLite DB (*.sqlite;*.db;*.db3)|*.sqlite;*.db;*.db3|Tutti i file (*.*)|*.*",
+                    FileName = Path.GetFileNameWithoutExtension(dbPath) + $"_backup_{DateTime.Now:yyyyMMdd_HHmmss}.sqlite",
+                    OverwritePrompt = true
+                };
+                if (sfd.ShowDialog(this) == DialogResult.OK)
+                {
+                    try { Db.BackupDatabase(sfd.FileName); }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(this, $"Backup non riuscito:\n{ex.Message}", "ERRORE",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                }
+                else
+                {
+                    if (MessageBox.Show(this, "Backup annullato. Procedere comunque alla pulizia?",
+                        "Conferma", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                }
+            }
+
+            try
+            {
+                Db.CleanAllData(keepCultures: true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Errore durante la pulizia:\n{ex.Message}", "ERRORE",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Refresh UI
+            gridOccurrences.Rows.Clear();
+            gridDrawings.Rows.Clear();
+            gridTranslations.Rows.Clear();
+            lblStatsImport.Text = "DB pulito.";
+            lblStatsTranslations.Text = "DB pulito.";
+            LoadDrawingsGrid();
+            LoadTranslationsGrid();
+
+            MessageBox.Show(this, "Pulizia completata.\n(Cultures mantenute. File compattato.)", "COMPLETATO",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void OnPickDxf()
@@ -212,6 +494,7 @@ namespace DxfI18N.App
                 {
                     var dxf = DxfDocument.Load(file);
 
+                    // ---- TEXT top-level ----
                     if (includeText && dxf.Entities?.Texts != null)
                     {
                         foreach (var t in dxf.Entities.Texts)
@@ -229,6 +512,7 @@ namespace DxfI18N.App
                         }
                     }
 
+                    // ---- MTEXT top-level ----
                     if (includeMText && dxf.Entities?.MTexts != null)
                     {
                         foreach (var m in dxf.Entities.MTexts)
@@ -246,6 +530,63 @@ namespace DxfI18N.App
                         }
                     }
 
+                    // ==== NOVITÀ: TEXT/MTEXT DENTRO I BLOCCHI (INSERT) ====
+                    if ((includeText || includeMText) && dxf.Entities?.Inserts != null)
+                    {
+                        foreach (var ins in dxf.Entities.Inserts)
+                        {
+                            var block = ins.Block;
+                            if (block == null) continue;
+
+                            foreach (var ent in block.Entities)
+                            {
+                                if (includeText && ent is netDxf.Entities.Text tBlk)
+                                {
+                                    var wp = TransformPoint2D(new netDxf.Vector2(tBlk.Position.X, tBlk.Position.Y), ins);
+                                    double wh = (tBlk.Height) * (ins.Scale.Y);
+                                    double wrot = (tBlk.Rotation) + (ins.Rotation);
+
+                                    string layerEff = EffectiveLayer(tBlk.Layer, ins);
+                                    if (selectedLayers.Count > 0 && !selectedLayers.Contains(layerEff)) continue;
+
+                                    string raw = tBlk.Value ?? "";
+                                    bool include = PassesFilters(NormalizeDxfText(raw, false));
+                                    string handle = $"{ins.Handle}|{tBlk.Handle}"; // handle composito
+
+                                    AddPreviewRow(include, file, layerEff, "TEXT", raw,
+                                        Math.Round(wp.X, 2), Math.Round(wp.Y, 2),
+                                        Math.Round(wrot, 2), Math.Round(wh, 2),
+                                        tBlk.Style?.Name, handle, null,
+                                        block.Name, null);
+
+                                    totalOcc++; if (include) totalShown++;
+                                }
+                                else if (includeMText && ent is netDxf.Entities.MText mBlk)
+                                {
+                                    var wp = TransformPoint2D(new netDxf.Vector2(mBlk.Position.X, mBlk.Position.Y), ins);
+                                    double wh = (mBlk.Height) * (ins.Scale.Y);
+                                    double wrot = (mBlk.Rotation) + (ins.Rotation);
+
+                                    string layerEff = EffectiveLayer(mBlk.Layer, ins);
+                                    if (selectedLayers.Count > 0 && !selectedLayers.Contains(layerEff)) continue;
+
+                                    string raw = mBlk.Value ?? "";
+                                    bool include = PassesFilters(NormalizeDxfText(raw, true));
+                                    string handle = $"{ins.Handle}|{mBlk.Handle}"; // handle composito
+
+                                    AddPreviewRow(include, file, layerEff, "MTEXT", raw,
+                                        Math.Round(wp.X, 2), Math.Round(wp.Y, 2),
+                                        Math.Round(wrot, 2), Math.Round(wh, 2),
+                                        mBlk.Style?.Name, handle, null,
+                                        block.Name, null);
+
+                                    totalOcc++; if (include) totalShown++;
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- ATTRIB negli INSERT ----
                     if (includeAttrib && dxf.Entities?.Inserts != null)
                     {
                         foreach (var ins in dxf.Entities.Inserts)
@@ -365,7 +706,6 @@ namespace DxfI18N.App
             r.Cells["colBlockName"].Value = blockName;
             r.Cells["colTag"].Value = tag;
         }
-
         private void OnImport()
         {
             var dbPath = Db.GetDatabasePath();
@@ -457,10 +797,80 @@ namespace DxfI18N.App
                         double? alignX = null;
                         double? alignY = null;
 
-                        // NEW: dati dell'INSERT (blocchi) — default null per TEXT/MTEXT
+                        // NEW: dati dell'INSERT (blocchi) — default null
                         string? ownerHandle = null;
                         double? ix = null, iy = null;
                         double? irot = null, sx = null, sy = null;
+
+                        // Se proviene da un blocco (handle "INS|ENT"), salva parametri INSERT
+                        // e, per MTEXT/TEXT, recupera anche le proprietà dall'entità interna al blocco
+                        if ((string.Equals(tipo, "TEXT", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(tipo, "MTEXT", StringComparison.OrdinalIgnoreCase)) &&
+                            handle.Contains("|"))
+                        {
+                            var parts = handle.Split('|');
+                            if (parts.Length == 2)
+                            {
+                                string insHandle = parts[0];
+                                string entHandle = parts[1];
+                                ownerHandle = insHandle;
+
+                                var ins = dxf.Entities.Inserts?.FirstOrDefault(i =>
+                                    string.Equals(i.Handle, insHandle, StringComparison.OrdinalIgnoreCase));
+                                if (ins != null)
+                                {
+                                    try { ix = ins.Position.X; } catch { }
+                                    try { iy = ins.Position.Y; } catch { }
+                                    try { irot = ins.Rotation; } catch { }
+                                    try { sx = ins.Scale.X; } catch { }
+                                    try { sy = ins.Scale.Y; } catch { }
+
+                                    // >>> NOVITÀ: recupera l'entità interna dal BlockDefinition
+                                    var blk = ins.Block;
+                                    if (blk != null)
+                                    {
+                                        // MTEXT nel blocco
+                                        if (string.Equals(tipo, "MTEXT", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            var mInner = blk.Entities.OfType<netDxf.Entities.MText>()
+                                                .FirstOrDefault(e => string.Equals(e.Handle, entHandle, StringComparison.OrdinalIgnoreCase));
+                                            if (mInner != null)
+                                            {
+                                                // Copiamo info che servono per replicare il wrapping
+                                                try { wrapWidth = mInner.RectangleWidth; } catch { }
+                                                try { attachment = mInner.AttachmentPoint.ToString(); } catch { }
+                                                if (string.IsNullOrWhiteSpace(stile))
+                                                    try { stile = mInner.Style?.Name; } catch { }
+                                            }
+                                        }
+                                        // TEXT nel blocco (per completezza: allineamento/pitch)
+                                        else if (string.Equals(tipo, "TEXT", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            var tInner = blk.Entities.OfType<netDxf.Entities.Text>()
+                                                .FirstOrDefault(e => string.Equals(e.Handle, entHandle, StringComparison.OrdinalIgnoreCase));
+                                            if (tInner != null)
+                                            {
+                                                try { widthFactor = tInner.WidthFactor; } catch { }
+                                                try
+                                                {
+                                                    var alignStr = tInner.Alignment.ToString();
+                                                    attachment = alignStr;
+                                                    if (!string.Equals(alignStr, "BaselineLeft", StringComparison.OrdinalIgnoreCase))
+                                                    {
+                                                        // se hai bisogno del punto di allineamento, puoi calcolarlo qui
+                                                        alignX ??= x; alignY ??= y;
+                                                    }
+                                                }
+                                                catch { }
+                                                if (string.IsNullOrWhiteSpace(stile))
+                                                    try { stile = tInner.Style?.Name; } catch { }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
 
                         if (string.Equals(tipo, "TEXT", StringComparison.OrdinalIgnoreCase))
                         {
@@ -700,6 +1110,24 @@ namespace DxfI18N.App
             }
         }
 
+        /// <summary>
+        /// Importa un CSV di traduzioni (UTF-8), rileva automaticamente il separatore (, oppure ;) e
+        /// aggiorna/crea righe in Translations. Rispetta "Consenti sovrascrittura Approved".
+        /// </summary>
+        // Restituisce il primo campo disponibile tra più possibili nomi di colonna (case-insensitive).
+        private static string GetFieldAny(CsvReader csv, params string[] names)
+        {
+            foreach (var n in names)
+            {
+                if (csv.TryGetField<string>(n, out var v) && v != null)
+                    return v;
+                // prova anche varianti senza spazi / case-insensitive
+                var noSpace = n.Replace(" ", "");
+                if (csv.TryGetField<string>(noSpace, out v) && v != null)
+                    return v;
+            }
+            return "";
+        }
         private void OnImportCsv()
         {
             var dbPath = Db.GetDatabasePath();
@@ -720,26 +1148,61 @@ namespace DxfI18N.App
             if (ofd.ShowDialog(this) != DialogResult.OK) return;
 
             int ok = 0, skip = 0, err = 0;
+            string? firstErr = null;
+
             try
             {
-                using var sr = new StreamReader(ofd.FileName);
-                using var csv = new CsvReader(sr, CultureInfo.InvariantCulture);
+                // Heuristica separatore: se header ha ';' e non ',', usa ';'
+                string? firstLine = null;
+                try { firstLine = System.IO.File.ReadLines(ofd.FileName).FirstOrDefault(); } catch { }
+                bool useSemicolon = firstLine != null && firstLine.IndexOf(';') >= 0 && firstLine.IndexOf(',') < 0;
+
+                var cfg = new CsvHelper.Configuration.CsvConfiguration(System.Globalization.CultureInfo.InvariantCulture)
+                {
+                    Delimiter = useSemicolon ? ";" : ",",
+                    IgnoreBlankLines = true,
+                    TrimOptions = CsvHelper.Configuration.TrimOptions.Trim,
+                    BadDataFound = null,
+                    MissingFieldFound = null,
+                };
+
+                // UTF-8 + BOM detection (per caratteri speciali)
+                using var sr = new System.IO.StreamReader(
+                    ofd.FileName,
+                    new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    detectEncodingFromByteOrderMarks: true
+                );
+                using var csv = new CsvHelper.CsvReader(sr, cfg);
+
+                // Leggi intestazione
+                if (!csv.Read()) throw new Exception("CSV vuoto.");
+                csv.ReadHeader();
 
                 while (csv.Read())
                 {
                     try
                     {
-                        int keyId = csv.GetField<int>("KeyId");
-                        string culture = csv.TryGetField<string>("Culture", out var c) ? (c ?? "") : "";
-                        string translated = csv.TryGetField<string>("Translated", out var t) ? (t ?? "") : "";
-                        string status = csv.TryGetField<string>("Status", out var s) ? (s ?? "") : "";
+                        // Requisito minimo: KeyId + Translated
+                        if (!csv.TryGetField<int>("KeyId", out var keyId))
+                        {
+                            err++; if (firstErr == null) firstErr = "Colonna 'KeyId' assente o non numerica.";
+                            continue;
+                        }
+
+                        // Translated: accetta sia "Translated" che "Translation"
+                        string translated = GetFieldAny(csv, "Translated", "Translation", "TranslatedText");
+
+                        // Culture: accetta "Culture", "CultureCode", "Culture code"; se manca usa la combo
+                        string culture = GetFieldAny(csv, "Culture", "CultureCode", "Culture code");
+                        if (string.IsNullOrWhiteSpace(culture))
+                            culture = cmbCultureTranslations.SelectedItem?.ToString() ?? "";
+
+                        // Status è facoltativo (default: Draft gestito in Upsert o lasciato vuoto)
+                        string status = GetFieldAny(csv, "Status", "State");
 
                         if (string.IsNullOrWhiteSpace(culture))
                         {
-                            culture = cmbCultureTranslations.SelectedItem?.ToString() ?? "";
-                        }
-                        if (string.IsNullOrWhiteSpace(culture))
-                        {
+                            // Non sappiamo dove importare → salto
                             skip++;
                             continue;
                         }
@@ -747,9 +1210,9 @@ namespace DxfI18N.App
                         Db.UpsertTranslation(keyId, culture, translated, status, overwriteApproved: chkOverwriteApproved.Checked);
                         ok++;
                     }
-                    catch
+                    catch (Exception rowEx)
                     {
-                        err++;
+                        err++; if (firstErr == null) firstErr = rowEx.Message;
                     }
                 }
             }
@@ -761,7 +1224,9 @@ namespace DxfI18N.App
             }
 
             LoadTranslationsGrid();
-            MessageBox.Show(this, $"Import CSV completato.\nOK: {ok}\nSaltati: {skip}\nErrori: {err}", "COMPLETATO",
+
+            var extra = err > 0 && !string.IsNullOrEmpty(firstErr) ? $"\nPrimo errore: {firstErr}" : "";
+            MessageBox.Show(this, $"Import CSV completato.\nOK: {ok}\nSaltati: {skip}\nErrori: {err}{extra}", "COMPLETATO",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -864,8 +1329,13 @@ namespace DxfI18N.App
                 gridDrawings.Rows.Add(id, path, importedAt);
         }
 
+        /// <summary>
+        /// Genera un DXF "multi-lingua": duplica per ogni lingua i testi (TEXT/MTEXT/ATTRIB) su layer dedicati.
+        /// Mantiene la geometria originale e aggiunge solo gli overlay di testo per ciascuna lingua attiva.
+        /// </summary>
         private void OnGenerateUnified()
         {
+            // [BEGIN] OnGenerateUnified
             // 1) Riga selezionata (o prima)
             DataGridViewRow? sel = gridDrawings.SelectedRows.Count > 0 ? gridDrawings.SelectedRows[0]
                                   : (gridDrawings.Rows.Count > 0 ? gridDrawings.Rows[0] : null);
@@ -957,6 +1427,21 @@ namespace DxfI18N.App
                                          : occ.DefaultText;
 
                         var layerRef = src.Layers[layerName];
+                        // === NEW: gestione occorrenze da blocco con clone+transform
+                        if (!string.IsNullOrEmpty(occ.EntityHandle) && occ.EntityHandle.Contains("|"))
+                        {
+                            var parts = occ.EntityHandle.Split('|');
+                            if (parts.Length == 2)
+                            {
+                                var cloned = CloneAndTransformBlockText(src, parts[0], parts[1], textOut ?? "", layerRef);
+                                if (cloned != null)
+                                {
+                                    src.Entities.Add(cloned);
+                                    continue;
+                                }
+                            }
+                        }
+
 
                         if (string.Equals(occ.EntityType, "TEXT", StringComparison.OrdinalIgnoreCase))
                         {
@@ -983,6 +1468,7 @@ namespace DxfI18N.App
                                     t.Alignment = ta;
                                 if (occ.WidthFactor.HasValue && occ.WidthFactor.Value > 0)
                                     t.WidthFactor = occ.WidthFactor.Value;
+                                EnsureTextAlignmentPoint(t);
                                 src.Entities.Add(t);
                             }
                         }
@@ -1052,12 +1538,12 @@ namespace DxfI18N.App
 
                             if (widthFactorOut.HasValue && widthFactorOut.Value > 0)
                                 t.WidthFactor = widthFactorOut.Value;
-
+                            EnsureTextAlignmentPoint(t);
                             src.Entities.Add(t);
                         }
                     }
                 }
-                
+
 
                 // 8) Salva
                 src.Save(sfd.FileName);
@@ -1070,6 +1556,230 @@ namespace DxfI18N.App
                 MessageBox.Show(this, $"Errore generazione DXF:\n{ex.Message}", "ERRORE",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+
+            // [END] OnGenerateUnified
+        }
+
+        /// <summary>
+        /// Genera un DXF *solo* per la lingua selezionata in combo: crea overlay su un layer di lingua
+        /// e salva con suffisso _<BCP47>.dxf (es. _pl-PL.dxf). Rispetta l'opzione "solo Approved".
+        /// </summary>
+        private void OnGenerateSingle()
+        {
+            // [BEGIN] OnGenerateSingle
+            var culture = cmbCultureGenerate.SelectedItem?.ToString();
+            if (string.IsNullOrWhiteSpace(culture))
+            {
+                MessageBox.Show(this, "Seleziona una lingua nella combo.", "MANCANO PREREQUISITI",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            DataGridViewRow? sel = gridDrawings.SelectedRows.Count > 0 ? gridDrawings.SelectedRows[0]
+                                      : (gridDrawings.Rows.Count > 0 ? gridDrawings.Rows[0] : null);
+            if (sel == null)
+            {
+                MessageBox.Show(this, "Nessun disegno in elenco. Importa prima un DXF.", "MANCANO PREREQUISITI",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            int drawingId = Convert.ToInt32(sel.Cells["colDrawingId"].Value);
+            string sourcePath = sel.Cells["colPath"].Value?.ToString() ?? "";
+            if (!File.Exists(sourcePath))
+            {
+                MessageBox.Show(this, "Il file sorgente non esiste più sul disco.", "ERRORE",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (MessageBox.Show(this, "Hai controllato i Not Approved?", "Conferma",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.No) return;
+
+            var defaultDir = @"C:\_ProjNoGit\_DXF_I18N\_DXF";
+            try { Directory.CreateDirectory(defaultDir); } catch { }
+            using var sfd = new SaveFileDialog
+            {
+                Title = $"Salva DXF ({culture})",
+                Filter = "DXF (*.dxf)|*.dxf",
+                InitialDirectory = defaultDir,
+                FileName = Path.GetFileNameWithoutExtension(sourcePath) + $"_{culture}.dxf",
+                OverwritePrompt = true
+            };
+            if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+            try
+            {
+                var src = netDxf.DxfDocument.Load(sourcePath);
+
+                var textByHandle = src.Entities.Texts?
+                    .Where(t => !string.IsNullOrEmpty(t.Handle))
+                    .ToDictionary(t => t.Handle!, t => t)
+                    ?? new Dictionary<string, netDxf.Entities.Text>();
+
+                var mtextByHandle = src.Entities.MTexts?
+                    .Where(m => !string.IsNullOrEmpty(m.Handle))
+                    .ToDictionary(m => m.Handle!, m => m)
+                    ?? new Dictionary<string, netDxf.Entities.MText>();
+
+                var attribByHandle = new Dictionary<string, netDxf.Entities.Attribute>();
+                if (src.Entities.Inserts != null)
+                {
+                    foreach (var ins in src.Entities.Inserts)
+                    {
+                        if (ins.Attributes == null) continue;
+                        foreach (var a in ins.Attributes)
+                        {
+                            if (!string.IsNullOrEmpty(a.Handle))
+                                attribByHandle[a.Handle] = a;
+                        }
+                    }
+                }
+
+                var cultureLayers = Db.GetCultureLayers(); // (CultureCode, LayerName)
+                string layerName = cultureLayers
+                    .FirstOrDefault(x => string.Equals(x.CultureCode, culture, StringComparison.OrdinalIgnoreCase))
+                    .LayerName ?? culture;
+
+                if (!src.Layers.Contains(layerName))
+                    src.Layers.Add(new netDxf.Tables.Layer(layerName));
+                var layerRef = src.Layers[layerName];
+
+                bool onlyApproved = chkOnlyApprovedGen.Checked;
+                var map = Db.GetTranslationsMap(culture, onlyApproved);
+                var occs = Db.GetOccurrencesForDrawing(drawingId);
+
+                foreach (var occ in occs)
+                {
+                    string textOut = map.TryGetValue(occ.KeyId, out var tr) && !string.IsNullOrEmpty(tr)
+                                     ? tr
+                                     : occ.DefaultText;
+                    // === NEW: se l'occorrenza proviene da un blocco, prova "clone + transform"
+                    if (!string.IsNullOrEmpty(occ.EntityHandle) && occ.EntityHandle.Contains("|"))
+                    {
+                        var parts = occ.EntityHandle.Split('|');       // parts[0] = HANDLE INSERT, parts[1] = HANDLE entità nel blocco
+                        if (parts.Length == 2)
+                        {
+                            var cloned = CloneAndTransformBlockText(src, parts[0], parts[1], textOut ?? "", layerRef);
+                            if (cloned != null)
+                            {
+                                src.Entities.Add(cloned);
+                                continue; // passa alla prossima occorrenza: abbiamo già inserito il testo
+                            }
+                        }
+                    }
+
+                    if (string.Equals(occ.EntityType, "TEXT", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!string.IsNullOrEmpty(occ.EntityHandle) && textByHandle.TryGetValue(occ.EntityHandle, out var tOrig))
+                        {
+                            var t = (netDxf.Entities.Text)tOrig.Clone();
+                            t.Value = textOut;
+                            t.Layer = layerRef;
+                            src.Entities.Add(t);
+                        }
+                        else
+                        {
+                            var anchor = new netDxf.Vector2(occ.PosX, occ.PosY);
+
+                            if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                Enum.TryParse<netDxf.Entities.TextAlignment>(occ.Attachment, out var ta) &&
+                                ta != netDxf.Entities.TextAlignment.BaselineLeft &&
+                                occ.AlignX.HasValue && occ.AlignY.HasValue)
+                            {
+                                anchor = new netDxf.Vector2(occ.AlignX.Value, occ.AlignY.Value);
+                            }
+
+                            var t = new netDxf.Entities.Text(textOut, anchor, occ.Height ?? 2.5)
+                            {
+                                Rotation = occ.Rotation ?? 0.0,
+                                Layer = layerRef
+                            };
+                            if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
+                                t.Style = src.TextStyles[occ.Style];
+                            if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                Enum.TryParse<netDxf.Entities.TextAlignment>(occ.Attachment, out var ta2))
+                                t.Alignment = ta2;
+                            if (occ.WidthFactor.HasValue && occ.WidthFactor.Value > 0)
+                                t.WidthFactor = occ.WidthFactor.Value;
+                            EnsureTextAlignmentPoint(t);
+                            src.Entities.Add(t);
+                        }
+                    }
+                    else if (string.Equals(occ.EntityType, "MTEXT", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!string.IsNullOrEmpty(occ.EntityHandle) && mtextByHandle.TryGetValue(occ.EntityHandle, out var mOrig))
+                        {
+                            var m = (netDxf.Entities.MText)mOrig.Clone();
+                            m.Value = (textOut ?? string.Empty).Replace("\r", "").Replace("\n", "\\P");
+                            m.Layer = layerRef;
+                            src.Entities.Add(m);
+                        }
+                        else
+                        {
+                            var m = new netDxf.Entities.MText
+                            {
+                                Value = (textOut ?? string.Empty).Replace("\r", "").Replace("\n", "\\P"),
+                                Position = new netDxf.Vector3(occ.PosX, occ.PosY, occ.PosZ),
+                                Height = occ.Height ?? 2.5,
+                                Rotation = occ.Rotation ?? 0.0,
+                                Layer = layerRef
+                            };
+                            if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
+                                m.Style = src.TextStyles[occ.Style];
+                            if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                                Enum.TryParse<netDxf.Entities.MTextAttachmentPoint>(occ.Attachment, out var ap))
+                                m.AttachmentPoint = ap;
+                            if (occ.WrapWidth.HasValue && occ.WrapWidth.Value > 0)
+                                m.RectangleWidth = occ.WrapWidth.Value;
+                            src.Entities.Add(m);
+                        }
+                    }
+                    else // ATTRIB → TEXT coerente
+                    {
+                        double px = occ.PosX, py = occ.PosY;
+                        double ax = occ.AlignX ?? px, ay = occ.AlignY ?? py;
+
+                        double outHeight = occ.Height ?? 2.5;
+                        double outRotation = occ.Rotation ?? 0.0;
+
+                        netDxf.Entities.TextAlignment? alignOut = null;
+                        if (!string.IsNullOrWhiteSpace(occ.Attachment) &&
+                            Enum.TryParse<netDxf.Entities.TextAlignment>(occ.Attachment, out var ta))
+                            alignOut = ta;
+
+                        var anchor = (alignOut.HasValue && alignOut.Value != netDxf.Entities.TextAlignment.BaselineLeft)
+                                     ? new netDxf.Vector2(ax, ay)
+                                     : new netDxf.Vector2(px, py);
+
+                        var t = new netDxf.Entities.Text(textOut ?? string.Empty, anchor, outHeight)
+                        {
+                            Rotation = outRotation,
+                            Layer = layerRef
+                        };
+                        if (!string.IsNullOrWhiteSpace(occ.Style) && src.TextStyles.Contains(occ.Style))
+                            t.Style = src.TextStyles[occ.Style];
+                        if (alignOut.HasValue)
+                            t.Alignment = alignOut.Value;
+                        if (occ.WidthFactor.HasValue && occ.WidthFactor.Value > 0)
+                            t.WidthFactor = occ.WidthFactor.Value;
+                        EnsureTextAlignmentPoint(t);
+                        src.Entities.Add(t);
+                    }
+                }
+
+                src.Save(sfd.FileName);
+                lblGenerateInfo.Text = $"DXF ({culture}) creato: {sfd.FileName}";
+                MessageBox.Show(this, "Generazione COMPLETATA.", "OK",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Errore generazione DXF:\n{ex.Message}", "ERRORE",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            // [END] OnGenerateSingle
         }
     }
 }
